@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+
+# Data — DB files contain real corpus and training data
+# Committed after deliberate decision; exclude by default
+data/*.db
+data/*.db-shm
+data/*.db-wal
+
+# Output — generated, reproducible from data
+output/
+
+# Samples — include sample texts but not large corpora
+# samples/*.txt  <- committed intentionally
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+*.jsonl.bak
+*.tmp

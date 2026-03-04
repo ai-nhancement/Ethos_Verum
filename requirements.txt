@@ -1,0 +1,3 @@
+# Ethos — Value Extraction Pipeline
+# Core pipeline: stdlib only, no ML deps in v1
+# Python 3.10+
