@@ -273,11 +273,101 @@ Ethos partially addresses the last bias through the spectrum principle — delib
 
 The current pipeline treats each passage independently. It does not model how a figure's values changed over time, even when multiple ingestion passes cover different periods of a figure's life. Value trajectory — the arc from early Malcolm X to late Malcolm X — is visible in the registry as an accumulation of observations but is not explicitly modeled as a temporal sequence.
 
-Future work should model value trajectories explicitly, tracking how resistance patterns and value demonstrations shift across decades of a figure's documented life.
+---
+
+## 7. Proposed Extensions
+
+The limitations above are not design dead-ends — each has a concrete architectural resolution. We describe these extensions here as a development roadmap, ordered by impact on corpus quality.
+
+### 7.1 Original-Language Scoring
+
+The most significant limitation of Phase 1 is that it scores translated text rather than original-language text. This means extraction results depend on a translator's word choices, not on the figure's own. Two English translations of the same Greek passage from Marcus Aurelius can produce entirely different keyword matches. The extraction is measuring the translator, not Aurelius.
+
+The architectural solution is multilingual embedding scoring. Modern multilingual models — LaBSE (Feng et al., 2022), multilingual-E5, and mBERT — map semantically equivalent sentences from different languages to neighboring points in a shared embedding space. The Greek "δικαιοσύνη" (justice/fairness) and the English "fairness" land near each other without any translation step. Value prototype vectors, once built from English seed examples, generalize to Greek, Arabic, Latin, Japanese, and Chinese automatically in the shared space.
+
+This enables a fundamentally different ingestion mode: **native-language ingestion**. The original text is stored alongside detected language metadata, and scoring runs against the multilingual embedding space directly. Translator bias is structurally eliminated.
+
+A secondary benefit: both the original text and an available translation can be scored independently. Agreement between scores in the two languages increases confidence in the observation. Disagreement between scores is itself a signal — it may indicate a translation that significantly altered semantic content, which is useful both for corpus quality control and for translation analysis.
+
+For the most common classical source languages — Ancient Greek, Latin, Classical Arabic, Classical Chinese — parallel keyword vocabularies in the original language provide an additional high-precision first pass before the embedding path, following the hybrid detection design described in Section 7.3.
+
+### 7.2 Temporal Value Arc and Life-Stage Modeling
+
+Human values are not static across a lifetime. Research in developmental psychology establishes that value priorities shift systematically with age: younger adults weight achievement, stimulation, and autonomy more heavily; older adults tend toward benevolence and security (Schwartz & Rubel, 2005). A corpus that treats a figure's 25-year-old writing and 65-year-old writing as equivalent observations from the same value profile loses this structure entirely.
+
+More concretely: Malcolm X in 1952 and Malcolm X in 1964 are empirically different value profiles. The transformation is documented, dateable, and arguably the most important behavioral data about him — it shows that deeply held values can be revised under accumulated evidence and experience. That trajectory is invisible in a flat lifetime aggregate.
+
+The proposed extension preserves the full lifetime profile while adding temporal sub-sessions derived from the `pub_year` field already stored at ingestion:
+
+```
+figure:malcolm_x              ← lifetime aggregate (always maintained)
+figure:malcolm_x:1950s        ← decade sub-session
+figure:malcolm_x:1960s        ← decade sub-session
+```
+
+The registry runs on all three sessions simultaneously. The lifetime profile captures the full behavioral picture. The decade profiles expose the arc. A new `value_trajectory()` query returns the sequence of decade-registry snapshots ordered chronologically, enabling direct visualization of how weight, resistance, and consistency evolve across a figure's life.
+
+A **peak influence period** parameter marks specific year ranges as the figure's most scrutinized era — the period when public attention was highest and therefore when behavioral evidence carries the most interpretive weight. Passages from this period receive a significance multiplier, increasing their contribution to both the registry and the exported training records.
+
+This extension also supports a developmental calibration claim that is difficult to make from current alignment datasets: the relationship between a figure's age, their accumulated experience, and the stability of their value profile. Young figures under pressure demonstrate value patterns that are more volatile; experienced figures show higher consistency. These developmental signatures are currently absent from alignment training data entirely.
+
+### 7.3 Hybrid Detection: Keyword and Embedding with Agreement Confidence
+
+Keyword matching and embedding similarity have complementary failure modes:
+
+| | Keyword Detection | Embedding Detection |
+|---|---|---|
+| Strength | High precision — exact vocabulary matches are reliable | High recall — catches paraphrase, historical diction, translation |
+| Failure mode | Misses synonyms, historical variants, indirect expression | May match semantically adjacent concepts that are not the target value |
+
+A hybrid detection architecture uses both and computes an **agreement confidence** score:
+
+```
+keyword_signal  ∈ {0, 1}     (match or no match)
+embedding_signal ∈ [0, 1]     (cosine similarity to value prototype vector)
+
+hybrid_score = (α × keyword_signal) + (1 − α) × embedding_signal
+agreement_confidence = 1.0 − |keyword_signal − embedding_signal|
+```
+
+Where α is a tunable keyword weight (default 0.5). Agreement confidence approaches 1.0 when both methods agree (both detect or both do not detect) and approaches 0.0 when they diverge. Divergence cases are the most informative:
+
+- **Keyword hit, low embedding similarity:** The keyword appeared in a context where it does not carry its value meaning (e.g., "I was afraid of running out of time" matches `courage` keywords but the embedding scores low on the courage prototype). The hybrid score attenuates; agreement confidence is low.
+- **No keyword hit, high embedding similarity:** A value was expressed in paraphrase, historical synonym, or translated diction that the keyword vocabulary does not cover. The hybrid score preserves the signal; agreement confidence is low but the observation is flagged as a Phase 2 catch — a case where embedding generalization outperformed keyword matching.
+
+High-agreement observations (agreement_confidence ≥ 0.8) become the highest-quality training examples in the corpus, validated by two independent detection methods. Low-agreement observations require human review before promotion to training status.
+
+This dual-method architecture also provides a continuous mechanism for improving the keyword vocabulary: embedding-only detections that are subsequently validated become candidates for addition to the Phase 1 keyword lists, closing the recall gap iteratively.
+
+### 7.4 Corpus Composition Balancing
+
+The historical record over-represents positively-regarded figures for structural reasons: their writings were preserved, collected, and digitized because they were celebrated. Left uncorrected, a corpus built from the historical record inherits this bias and produces a skewed P1:P0:APY ratio regardless of ingestion strategy.
+
+We propose a two-level balancing framework:
+
+**Figure-level composition guideline:** For every canonically virtuous figure (Gandhi, Lincoln, Mandela), the corpus targets four or more middle-ground figures — figures whose profiles are asymmetric, documented on both value demonstrations and value failures, and representative of the complex majority of historical actors rather than the exceptional minority. This 1:4 ratio is a recommended composition target, not a hard gate. The `cli/balance.py` reporting tool surfaces current ratio metrics and recommends additional ingestion to approach the target.
+
+**Observation-level export weighting:** Within the exported training set, observations are reweighted by inverse label frequency to achieve a configurable target balance. A corpus currently at P1:P0 = 70:30 can be exported at 50:50 effective training weight without discarding any observations — the P0 and APY observations receive higher training weights to compensate for their underrepresentation in the raw corpus.
+
+The balance correction at export time decouples corpus composition (what was ingested) from training data composition (what balance the downstream model sees). Researchers can experiment with different balance targets without re-ingesting, and can report both the raw corpus composition and the effective training composition transparently.
+
+### 7.5 Vocabulary Extension for Temporal Dialect Coverage
+
+The Phase 1 keyword vocabulary is tuned for contemporary English. Historical texts — even those originally written in English — use vocabulary that has shifted significantly. Key examples:
+
+- `fortitude`, `valour`, `steadfastness` → courage
+- `verity`, `candour`, `probity` → integrity
+- `clemency`, `forbearance`, `benevolence` → compassion
+- `fealty`, `fidelity`, `constancy` → loyalty
+- `contrition`, `penitence` → humility
+
+Systematic expansion of the keyword vocabulary with period-specific and register-specific synonyms increases recall across historical texts without degrading precision, since these terms carry unambiguous value semantics in their historical contexts. A vocabulary maintenance tool tracks which additions were prompted by embedding-only detections (Section 7.3), creating a continuous improvement loop between the two detection paths.
+
+For non-English original-language texts, parallel keyword vocabularies in Ancient Greek, Latin, Classical Arabic, Classical Chinese, and Early Modern French and German cover the most common sources in the historical record and provide high-precision original-language matching before the multilingual embedding path.
 
 ---
 
-## 7. Conclusion
+## 8. Conclusion
 
 The central problem with current value-alignment datasets is not their size or their methodology — it is their source material. Hypothetical scenarios capture declared values. Preference rankings capture momentary aesthetic judgment. Neither captures what human values actually look like when they are tested: when holding them costs something, when external pressure is applied, when the easy choice is abandonment and the hard choice is maintenance.
 

@@ -552,32 +552,57 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 - [x] `cli/ingest.py` — full ingestion pipeline with dry-run
 - [x] `cli/export.py` — P1/P0/APY classification + JSONL export
 
-### Phase 1 — Semantic Extraction
-- [ ] Replace keyword vocabulary with embedding-based clustering
-- [ ] Integrate `sentence-transformers` for passage embeddings
-- [ ] Qdrant or FAISS for value cluster matching
-- [ ] Collect Phase 0 keyword baseline first to validate transition
+### Phase 1 — Multilingual Ingestion
+- [ ] Multilingual embedding model: LaBSE or mE5-large (109 languages)
+- [ ] `--lang` flag in `cli/ingest.py` — native-language ingestion path
+- [ ] `VALUE_VOCAB` extended with pre-20th-century English synonyms (`fortitude`, `verity`, `magnanimity`, etc.)
+- [ ] Parallel keyword lists for Greek / Latin / Arabic / Chinese / French / German
+- [ ] Dual-language agreement scoring when both original + translation are available
 
-### Phase 2 — API Layer
+### Phase 2 — Hybrid Detection + Agreement Confidence
+- [ ] Passage embedding store — 15 value cluster centroids from `VALUE_VOCAB` seed passages
+- [ ] FAISS or Qdrant ANN search — nearest value cluster per passage
+- [ ] `hybrid_score = α × keyword_signal + (1−α) × embedding_signal` (default α=0.5)
+- [ ] `agreement_confidence = 1.0 − |keyword_signal − embedding_signal|` — exported as field
+- [ ] α configurable in `core/config.py`
+- [ ] Phase 0 keyword observations remain valid; backward compatible
+
+### Phase 3 — Temporal Value Arcs
+- [ ] `--era 1960s` flag in `cli/ingest.py` → `session_id = figure:mlk:1960s`
+- [ ] `value_trajectory()` query in `core/value_store.py` → ordered `(era, value_name, weight)` tuples
+- [ ] `--peak-era` flag — boosts significance weighting for peak-influence era
+- [ ] `cli/export.py --by-era` — separate JSONL per era per figure
+- [ ] `temporal_consistency` column in registry — stability metric across eras
+
+### Phase 4 — Corpus Balance Tool
+- [ ] `cli/balance.py` — analyze corpus composition by P1-rate distribution
+- [ ] Corpus report: figure type breakdown, P1/P0/APY ratios, coverage gaps
+- [ ] Inverse-frequency export weighting — over-represented values down-weighted
+- [ ] `corpus.target_spectrum_ratio` in `core/config.py` (default: 1 positive : 4 middle-ground)
+- [ ] Recommendation output: suggests which figure types are underrepresented
+
+### Phase 5 — API Layer
 - [ ] FastAPI service wrapping the pipeline
 - [ ] `POST /figures/{name}/ingest` — accepts text payload directly
-- [ ] `GET /figures/{name}/profile` — value registry as JSON
+- [ ] `GET /figures/{name}/profile` — value registry as JSON, with temporal arc if available
 - [ ] `GET /figures/universal` — cross-figure aggregate
 - [ ] `GET /export/ric` — trigger export, return report
 
-### Phase 3 — Web Dashboard
-- [ ] Figure browser — profile cards, value radar charts
-- [ ] Corpus upload UI
+### Phase 6 — Web Dashboard
+- [ ] Figure browser — profile cards, value radar charts, temporal arc view
+- [ ] Corpus upload UI — drag-and-drop + doc_type + era selectors
 - [ ] Universal registry visualization — cross-figure value heatmap
-- [ ] Training set builder — filter by figure / value / doc_type / label
+- [ ] Training set builder — filter by figure / value / doc_type / label / era
+- [ ] Observation inspector — raw passage with resistance, hybrid score, agreement confidence
 
-### Phase 4 — Corpus Scale
+### Phase 7 — Corpus Scale + HuggingFace
 - [ ] Batch ingestion CLI for processing a directory of files
-- [ ] Multi-file figure support (multiple doc_types per figure)
+- [ ] Multi-file figure support (multiple doc_types per figure, additive)
 - [ ] Corpus statistics: vocabulary coverage, value distribution, resistance distribution
-- [ ] Dataset card generation (for HuggingFace compatibility)
+- [ ] Dataset card generation (HuggingFace-compatible metadata)
+- [ ] `datasets` library export — `load_dataset()` compatible
 
-### Phase 5 — SRL Integration (optional)
+### Phase 8 — SRL Integration (optional)
 - [ ] Port `modules/srl/` from AiMe: claim_extractor, ric_gate, trait_compiler
 - [ ] AI integrity layer: applies RIC gate to model outputs during evaluation
 - [ ] Behavioral trait profiles derived from extracted value registry

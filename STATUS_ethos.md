@@ -72,26 +72,90 @@ python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type spee
 
 ---
 
-## Phase 1 — Semantic Extraction ⏳
+## Phase 1 — Multilingual Ingestion ⏳
 
-**Goal:** Replace keyword vocabulary with embedding-based clustering. Capture values from passages where the exact keywords don't appear but the semantic meaning is present.
+**Goal:** Score value signals in a passage's original language before translation loss corrupts the evidence. Extend the vocabulary with historical dialect synonyms across six language families.
 
 **Why this matters:**
-- Keyword matching misses paraphrase, historical diction, translated text
-- Embedding clustering can generalize across writing styles and eras
-- Phase 0 keyword baseline validates the pipeline before the switch
+- Gandhi's private letters were in Gujarati. Translating before scoring destroys register and diction cues the resistance formula relies on.
+- Historical English uses different vocabulary than modern English (`fortitude` → courage, `verity` → integrity).
+- A pipeline that only works in modern English cannot build a universal corpus.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Passage embedding | ⏳ | `sentence-transformers`, BGE-base or similar |
-| Value cluster vectors | ⏳ | 15 seed vectors from VALUE_VOCAB centroids |
-| FAISS/Qdrant integration | ⏳ | ANN search against value cluster prototypes |
-| Hybrid scoring | ⏳ | Keyword + semantic blend, configurable weight |
-| Backward compatibility | ⏳ | Phase 0 observations remain valid |
+| Multilingual embedding model | ⏳ | LaBSE or mE5-large — 109-language sentence vectors |
+| Parallel keyword lists | ⏳ | Greek / Latin / Arabic / Chinese / French / German value synonyms |
+| Historical dialect expansion | ⏳ | `VALUE_VOCAB` extended with pre-20th-century English synonyms |
+| Native-language ingestion path | ⏳ | `--lang` flag in `cli/ingest.py` selects embedding model |
+| Dual-language agreement scoring | ⏳ | Score in original + translated; use max or agreement-weighted blend |
 
 ---
 
-## Phase 2 — API Layer ⏳
+## Phase 2 — Hybrid Detection + Agreement Confidence ⏳
+
+**Goal:** Replace keyword-only detection with a hybrid metric combining keyword signal and embedding signal. The agreement between them becomes a first-class quality signal.
+
+**Design:**
+
+```
+keyword_signal   = keyword match score (0.0–1.0, current Phase 0 output)
+embedding_signal = cosine similarity to value cluster centroid (0.0–1.0)
+
+hybrid_score         = α × keyword_signal + (1 − α) × embedding_signal
+agreement_confidence = 1.0 − |keyword_signal − embedding_signal|
+```
+
+`agreement_confidence` is high when both methods agree, low when they diverge. Low-confidence observations are flagged for human review rather than discarded.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Passage embedding store | ⏳ | 15 value cluster centroids from VALUE_VOCAB seed passages |
+| FAISS/Qdrant ANN search | ⏳ | Nearest value cluster per passage |
+| `hybrid_score` field | ⏳ | Added to observation + export JSONL |
+| `agreement_confidence` field | ⏳ | Added to observation + export JSONL |
+| α tuning | ⏳ | Configurable in `core/config.py` — default α=0.5 |
+| Backward compatibility | ⏳ | Phase 0 keyword observations remain valid |
+
+---
+
+## Phase 3 — Temporal Value Arcs ⏳
+
+**Goal:** Track how a figure's values shift across time — life stages, decades, the period of peak influence — rather than collapsing all their writing into a single flat profile.
+
+**Why this matters:**
+- MLK's early writings express different priorities than his final years.
+- Churchill's documented values during wartime differ from peacetime.
+- Averaging across a life erases the arc. The arc is the evidence.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Decade sub-sessions | ⏳ | `--era 1960s` flag → `session_id = figure:mlk:1960s` |
+| `value_trajectory()` query | ⏳ | Returns ordered list of `(era, value_name, weight)` tuples |
+| Peak period parameter | ⏳ | `--peak-era` flag — boosts significance weighting for that era |
+| Temporal export mode | ⏳ | `cli/export.py --by-era` — separate JSONL per era per figure |
+| Cross-era consistency | ⏳ | Add `temporal_consistency` column to registry — how stable across eras |
+
+---
+
+## Phase 4 — Corpus Balance Tool ⏳
+
+**Goal:** Prevent corpus bias toward famous virtuous figures. The pipeline should produce training data that mirrors the distribution of documented human behavior — not the distribution of celebrated biography.
+
+**Target ratio:** 1 unambiguously positive figure : 4 middle-ground / complex figures. Negative figures are included as needed to populate P0/APY labels.
+
+**No pre-labeling invariant preserved:** the balance tool works on post-extraction profile shape (P1 rate, avg resistance), not on human-assigned labels at ingestion.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `cli/balance.py` | ⏳ | Analyze corpus composition by P1-rate distribution |
+| Corpus report | ⏳ | Shows figure type breakdown, value coverage, P1/P0/APY ratios |
+| Inverse-frequency export weighting | ⏳ | Over-represented value types down-weighted in export |
+| Balance target config | ⏳ | `corpus.target_spectrum_ratio` in `core/config.py` |
+| Recommendation output | ⏳ | Suggests which figure types are missing from corpus |
+
+---
+
+## Phase 5 — API Layer ⏳
 
 **Goal:** REST API wrapping the pipeline. Enables integration with other tools, web UI, and batch processing.
 
@@ -107,23 +171,24 @@ python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type spee
 
 ---
 
-## Phase 3 — Web Dashboard ⏳
+## Phase 6 — Web Dashboard ⏳
 
-**Goal:** Browser UI for corpus management, profile exploration, and training set building.
+**Goal:** Browser UI for corpus management, profile exploration, and training set builder.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Figure browser | ⏳ | Profile cards — value radar chart per figure |
+| Temporal arc view | ⏳ | Per-figure value trajectory across eras |
 | Corpus upload | ⏳ | Drag-and-drop text file + doc_type selector |
 | Universal registry view | ⏳ | Cross-figure value heatmap |
-| Training set builder | ⏳ | Filter by figure / value / doc_type / label |
-| Observation inspector | ⏳ | Raw passage view with resistance + label |
+| Training set builder | ⏳ | Filter by figure / value / doc_type / label / era |
+| Observation inspector | ⏳ | Raw passage view with resistance + hybrid score + agreement confidence |
 
 ---
 
-## Phase 4 — Corpus Scale ⏳
+## Phase 7 — Corpus Scale + HuggingFace ⏳
 
-**Goal:** Support large-scale corpus processing and HuggingFace-compatible dataset publishing.
+**Goal:** Large-scale corpus processing and HuggingFace-compatible dataset publishing.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -135,7 +200,7 @@ python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type spee
 
 ---
 
-## Phase 5 — SRL Integration 💡
+## Phase 8 — SRL Integration 💡
 
 **Goal:** Port AiMe's Self-Reflection Layer to Ethos as an optional module — enabling behavioral trait compilation and the RIC gate for evaluating AI model outputs.
 
@@ -167,3 +232,19 @@ python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type spee
 ### 2026-03-04 — Document type as first-class signal
 **Decision:** Document type set at ingestion, propagates through resistance scoring and export weighting. Cannot be overridden post-ingestion without re-ingesting.
 **Rationale:** Authenticity of evidence is a structural property, not a metadata tag. It must affect scoring at every stage.
+
+### 2026-03-04 — Original-language scoring (Phase 1)
+**Decision:** Value detection will target source-language text using multilingual embeddings (LaBSE/mE5), not only modern English translations.
+**Rationale:** Translation degrades diction, register, and emotional precision — all of which the resistance formula depends on. A Gandhi journal entry in Gujarati carries richer signal than an English translation of it. The pipeline must honor that.
+
+### 2026-03-04 — Hybrid detection with agreement confidence (Phase 2)
+**Decision:** Phase 2 will run both keyword matching and embedding cosine similarity, then report `hybrid_score = α×keyword + (1−α)×embedding` and `agreement_confidence = 1 − |keyword_signal − embedding_signal|`.
+**Rationale:** Neither method alone is sufficient. Keywords miss paraphrase; embeddings miss precision. Agreement confidence turns the disagreement between methods into a signal — low-confidence observations get flagged for review rather than silently included.
+
+### 2026-03-04 — Temporal sub-sessions (Phase 3)
+**Decision:** Support `session_id = figure:mlk:1960s` sub-sessions for era-partitioned value extraction.
+**Rationale:** Collapsing a person's entire life into one profile erases value evolution. The arc of change across life stages is itself a training signal for models that need to understand moral development, not just moral state.
+
+### 2026-03-04 — Corpus balance ratio (Phase 4)
+**Decision:** Target 1:4 unambiguous positive-to-middle-ground figure ratio. Balance tool operates on post-extraction P1-rate, not on pre-ingestion human labels.
+**Rationale:** Corpus composition bias toward celebrated virtuous figures produces training data that reflects reputation, not behavioral reality. The balance tool corrects this structurally. No figure is labeled at ingestion — that invariant is preserved.
