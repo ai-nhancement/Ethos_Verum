@@ -327,10 +327,15 @@ _DISQUALIFIERS: Dict[str, re.Pattern] = {
         r"the\s+procedure|the\s+hospital|the\s+illness|the\s+disease|the\s+infection|the\s+treatment)\b",
         re.IGNORECASE,
     ),
-    # "I will call/text/email/meet you" -- scheduling, not moral commitment
+    # "I will call/text/email/meet you" / "committed to targets" / "dedicated to gym" -- not moral commitment
     "commitment": re.compile(
         r"\bI\s+will\s+(?:call|text|email|send|meet|see\s+you|be\s+there\s+at|arrive|"
-        r"attend\s+the|join\s+the|check|look\s+into)\b",
+        r"attend\s+the|join\s+the|check|look\s+into)\b"
+        r"|\bcommitted\s+to\s+(?:the\s+)?(?:project|plan|goal|target|objective|"
+        r"budget|timeline|schedule|roadmap|strategy|kpi|okr)\b"
+        r"|\bcommitted\s+to\s+(?:achieving|reaching|hitting|meeting|delivering|"
+        r"executing|fulfilling|implementing|completing)\b"
+        r"|\bdedicated\s+to\s+(?:the\s+)?(?:gym|fitness|working\s+out|diet|exercise|routine)\b",
         re.IGNORECASE,
     ),
     # "responsible for the project/meeting/report" -- task assignment, not moral accountability
@@ -365,7 +370,25 @@ _DISQUALIFIERS: Dict[str, re.Pattern] = {
         r"\bmoved\s+by\s+(?:the\s+)?(?:performance|film|movie|music|song|score|concert|play|book|story)\b",
         re.IGNORECASE,
     ),
+    # "getting better from the flu" / "improving my score" -- medical/metric, not character growth
+    "growth": re.compile(
+        r"\bgetting\s+better\s+(?:from|after|following)\b"
+        r"|\b(?:improved|improving)\s+(?:my\s+)?(?:cholesterol|blood\s+pressure|"
+        r"symptoms|condition|score|grade|ranking|rating|numbers?)\b",
+        re.IGNORECASE,
+    ),
+
+    # "on my own to the store" / "cooking by myself" -- trivial self-sufficiency, not the value
+    "independence": re.compile(
+        r"\b(?:on\s+my\s+own|by\s+myself)\s+"
+        r"(?:to\s+(?:the|a)\s+\w+|at\s+(?:the|a)\s+\w+|"
+        r"shopping|cooking|driving|walking|cleaning|playing|running|working\s+out)\b"
+        r"|\b(?:shopping|cooking|driving|walking|cleaning|playing|running|working\s+out)"
+        r"\s+(?:on\s+my\s+own|by\s+myself)\b",
+        re.IGNORECASE,
+    ),
 }
+
 
 
 def _check_signal(

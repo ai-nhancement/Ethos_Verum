@@ -379,6 +379,121 @@ def test_check_signal_does_not_raise_on_empty_string():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SUITE 8: New disqualifiers — growth, independence, commitment (expanded)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_growth_medical_recovery_rejected():
+    expect_fail("I am getting better from the flu after a week in bed", "growth", "getting better")
+
+def test_growth_score_improvement_rejected():
+    expect_fail("I have been improving my cholesterol levels through diet", "growth", "improving")
+
+def test_growth_grade_rejected():
+    expect_fail("she improved her grade this semester with extra study", "growth", "improved")
+
+def test_growth_genuine_character_passes():
+    expect_pass("I am learning from my mistakes and becoming a better person", "growth", "learning", min_conf=1.0)
+
+def test_growth_self_improvement_passes():
+    expect_pass("I have worked hard to improve myself and change my thinking", "growth", "improve", min_conf=1.0)
+
+def test_independence_trivial_errand_rejected():
+    expect_fail("I went on my own to the store to pick up groceries", "independence", "on my own")
+
+def test_independence_trivial_activity_rejected():
+    expect_fail("I walked by myself to the park every morning", "independence", "by myself")
+
+def test_independence_trivial_cooking_rejected():
+    expect_fail("I did all the cooking by myself every single night", "independence", "by myself")
+
+def test_independence_genuine_passes():
+    expect_pass("I made my own decisions and refused to be controlled by anyone", "independence", "my own", min_conf=1.0)
+
+def test_independence_sovereignty_passes():
+    expect_pass("I chose to be self-reliant and answer to no one but myself", "independence", "self-reliant", min_conf=1.0)
+
+def test_commitment_corporate_goal_rejected():
+    expect_fail("we are committed to achieving our Q4 targets this quarter", "commitment", "committed")
+
+def test_commitment_okr_rejected():
+    expect_fail("I am committed to the roadmap and our strategic kpi", "commitment", "committed")
+
+def test_commitment_gym_dedication_rejected():
+    expect_fail("she is dedicated to the gym and her fitness routine", "commitment", "dedicated")
+
+def test_commitment_genuine_pledge_passes():
+    expect_pass("I am committed to standing by my people no matter what comes", "commitment", "committed", min_conf=1.0)
+
+def test_commitment_dedicated_person_passes():
+    expect_pass("I have always been dedicated to those who depend on me", "commitment", "dedicated", min_conf=1.0)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUITE 9: Integration — real sample text
+# ─────────────────────────────────────────────────────────────────────────────
+
+import os
+
+_SAMPLE_PATH = os.path.join(os.path.dirname(__file__), "..", "samples", "test_figure.txt")
+
+def test_sample_text_fires_expected_values():
+    """The canonical test_figure.txt must produce key value signals."""
+    with open(_SAMPLE_PATH, encoding="utf-8") as f:
+        passages = [p.strip() for p in f.read().split("\n\n") if p.strip()]
+
+    all_sigs = []
+    for i, passage in enumerate(passages):
+        sigs = extract_value_signals(passage, f"r{i}", 0.8)
+        all_sigs.extend(sigs)
+
+    found = {s["value_name"] for s in all_sigs}
+    # passage 1: "afraid of losing everything, I refused to betray" -> courage + integrity
+    assert "courage" in found, f"courage not found in sample. Found: {found}"
+    assert "integrity" in found, f"integrity not found in sample. Found: {found}"
+    # passage 3: "I was wrong ... my mistake" -> humility
+    assert "humility" in found, f"humility not found in sample. Found: {found}"
+    # passage 4: "curiosity that drove me forward" -> curiosity
+    assert "curiosity" in found, f"curiosity not found in sample. Found: {found}"
+    # passage 5: "loyalty to those who depended on me" -> loyalty
+    assert "loyalty" in found, f"loyalty not found in sample. Found: {found}"
+
+def test_sample_text_all_have_confidence_field():
+    """Every signal from sample text must carry disambiguation_confidence."""
+    with open(_SAMPLE_PATH, encoding="utf-8") as f:
+        passages = [p.strip() for p in f.read().split("\n\n") if p.strip()]
+
+    for i, passage in enumerate(passages):
+        sigs = extract_value_signals(passage, f"r{i}", 0.8)
+        for s in sigs:
+            assert "disambiguation_confidence" in s, \
+                f"Missing disambiguation_confidence in signal: {s}"
+            assert 0.0 < s["disambiguation_confidence"] <= 1.0, \
+                f"confidence out of range: {s['disambiguation_confidence']}"
+
+def test_sample_text_no_false_positives_from_known_patterns():
+    """
+    Passage 6 of sample: 'I told them what they wanted to hear... I was weak.'
+    This IS a genuine integrity failure (P0/APY context).
+    What it should NOT produce: false patience/medical hits, love-preference hits, etc.
+    """
+    passage6 = (
+        "Under pressure from the authorities, I told them what they wanted to hear. "
+        "I rationalized it as pragmatism, but I was weak. I caved to save myself."
+    )
+    sigs = extract_value_signals(passage6, "r6", 0.8)
+    values = {s["value_name"] for s in sigs}
+    # Should NOT fire on non-present or trivially-matched values
+    assert "patience" not in values, "patience false positive on passage 6"
+    assert "love" not in values, "love false positive on passage 6"
+
+def test_15_values_disqualifiers_all_loaded():
+    """All 15 values must have a disqualifier entry."""
+    from core.value_extractor import _DISQUALIFIERS, VALUE_VOCAB
+    missing = set(VALUE_VOCAB.keys()) - set(_DISQUALIFIERS.keys())
+    assert not missing, f"Values still missing disqualifiers: {missing}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Runner
 # ─────────────────────────────────────────────────────────────────────────────
 
