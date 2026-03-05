@@ -324,13 +324,13 @@ class TestStoreIntegration(unittest.TestCase):
         self.assertAlmostEqual(obs[0]["disambiguation_confidence"], 0.7, places=4)
 
     def test_consistency_computed_on_upsert(self):
-        # First upsert: no existing obs → consistency defaults to 0.5
+        # First upsert: no existing obs → _compute_consistency runs for n=1
         self.store.upsert_registry("sess", "integrity", 0.8, 0.7, NOW, "essay")
         reg = self.store.get_registry("sess")
         entry = next((r for r in reg if r["value_name"] == "integrity"), None)
         self.assertIsNotNone(entry)
-        # First upsert skips _compute_consistency (inserts with 0.5)
-        self.assertAlmostEqual(entry["consistency"], 0.5, places=4)
+        # n=1, stab=0, spread=0, div=1/3 → c = 0.30*0.10 + 0.15*(1/3) = 0.08
+        self.assertAlmostEqual(entry["consistency"], 0.08, places=4)
 
     def test_consistency_updated_on_second_upsert(self):
         # Must call record_observation first so _compute_consistency can query value_observations

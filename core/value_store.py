@@ -205,6 +205,7 @@ class ValueStore:
 
             now = time.time()
             if row is None:
+                consistency = _compute_consistency(conn, session_id, value_name, resistance, ts, str(doc_type or "unknown"))
                 conn.execute(
                     """INSERT INTO value_registry
                        (session_id, value_name, demonstrations, avg_significance,
@@ -213,8 +214,8 @@ class ValueStore:
                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     (session_id, value_name, 1,
                      float(significance), float(resistance),
-                     0.5,
-                     float(significance) * float(resistance) * 0.5,
+                     consistency,
+                     float(significance) * float(resistance) * consistency,
                      ts, ts, now),
                 )
             else:
