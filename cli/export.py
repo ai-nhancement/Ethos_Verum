@@ -288,12 +288,13 @@ def _detect_tensions(
     Detect value tension events: two tension-pair values in the same passage
     where one is P1 and the other is P0/APY.
 
-    Persists events to value_tension table. Returns list for JSONL export.
+    Persists events via ValueStore.record_tension(). Returns list for JSONL export.
     Tension events carry 1.5× training weight per spec.
     """
     from itertools import combinations
-    import sqlite3 as _sql3
-    import uuid as _uuid
+    from core.value_store import ValueStore
+
+    store = ValueStore(db_path=db_path)
 
     passages: Dict[str, List[Dict]] = defaultdict(list)
     for r in records:
@@ -302,53 +303,41 @@ def _detect_tensions(
 
     events: List[Dict[str, Any]] = []
 
-    try:
-        conn = _sql3.connect(db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        for recs in passages.values():
-            if len(recs) < 2:
+    for recs in passages.values():
+        if len(recs) < 2:
+            continue
+        for r1, r2 in combinations(recs, 2):
+            if not is_tension_pair(r1["value_name"], r2["value_name"]):
                 continue
-            for r1, r2 in combinations(recs, 2):
-                if not is_tension_pair(r1["value_name"], r2["value_name"]):
-                    continue
-                r1_pos = (r1["label"] == "P1")
-                r2_pos = (r2["label"] == "P1")
-                if r1_pos == r2_pos:
-                    continue  # both same direction
-                held   = r1 if r1_pos else r2
-                failed = r2 if r1_pos else r1
-                uid = str(_uuid.uuid4())
-                event = {
-                    "id":             uid,
-                    "session_id":     held["session_id"],
-                    "record_id":      held["record_id"],
-                    "ts":             held["ts"],
-                    "figure":         held["figure"],
-                    "value_held":     held["value_name"],
-                    "value_failed":   failed["value_name"],
-                    "resistance":     round(float(held.get("resistance", 0.0)), 4),
-                    "text_excerpt":   str(held.get("text_excerpt", ""))[:300],
-                    "held_label":     held["label"],
-                    "failed_label":   failed["label"],
-                    "training_weight": round(float(held.get("training_weight", 1.0)) * 1.5, 4),
-                }
-                events.append(event)
-                try:
-                    conn.execute(
-                        """INSERT OR IGNORE INTO value_tension
-                           (id, session_id, record_id, ts, value_held, value_failed,
-                            resistance, text_excerpt)
-                           VALUES (?,?,?,?,?,?,?,?)""",
-                        (uid, event["session_id"], event["record_id"], float(event["ts"]),
-                         event["value_held"], event["value_failed"],
-                         event["resistance"], event["text_excerpt"]),
-                    )
-                except Exception:
-                    pass
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+            r1_pos = (r1["label"] == "P1")
+            r2_pos = (r2["label"] == "P1")
+            if r1_pos == r2_pos:
+                continue  # both same direction
+            held   = r1 if r1_pos else r2
+            failed = r2 if r1_pos else r1
+            event = {
+                "id":             store.record_tension(
+                    session_id=held["session_id"],
+                    record_id=held["record_id"],
+                    ts=float(held["ts"]),
+                    value_held=held["value_name"],
+                    value_failed=failed["value_name"],
+                    resistance=float(held.get("resistance", 0.0)),
+                    text_excerpt=str(held.get("text_excerpt", "")),
+                ),
+                "session_id":     held["session_id"],
+                "record_id":      held["record_id"],
+                "ts":             held["ts"],
+                "figure":         held["figure"],
+                "value_held":     held["value_name"],
+                "value_failed":   failed["value_name"],
+                "resistance":     round(float(held.get("resistance", 0.0)), 4),
+                "text_excerpt":   str(held.get("text_excerpt", ""))[:300],
+                "held_label":     held["label"],
+                "failed_label":   failed["label"],
+                "training_weight": round(float(held.get("training_weight", 1.0)) * 1.5, 4),
+            }
+            events.append(event)
 
     return events
 
