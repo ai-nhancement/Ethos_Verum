@@ -23,17 +23,7 @@ from __future__ import annotations
 
 import re
 import time
-import re as _re
-
-# APY pressure pattern — mirrors cli/export._APY_PRESSURE_RE (kept in sync manually)
-_APY_PRESSURE_RE_INGEST = _re.compile(
-    r'\b(under pressure|when pressed|when threatened|when they demanded|'
-    r'to avoid punishment|to save myself|to protect my position|'
-    r'they insisted|they demanded|forced to|compelled to|'
-    r'or face consequences|or be punished|or lose everything|'
-    r'i told them what they wanted to hear|said what was expected)\b',
-    _re.IGNORECASE,
-)
+from core.apy_patterns import APY_PRESSURE_RE as _APY_PRESSURE_RE_INGEST
 from typing import Dict, List
 
 from core.config import get_config

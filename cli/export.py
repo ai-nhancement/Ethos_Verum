@@ -95,14 +95,7 @@ _HOLD_RE = re.compile(
     re.IGNORECASE,
 )
 
-_APY_PRESSURE_RE = re.compile(
-    r'\b(under pressure|when pressed|when threatened|when they demanded|'
-    r'to avoid punishment|to save myself|to protect my position|'
-    r'they insisted|they demanded|forced to|compelled to|'
-    r'or face consequences|or be punished|or lose everything|'
-    r'i told them what they wanted to hear|said what was expected)\b',
-    re.IGNORECASE,
-)
+from core.apy_patterns import APY_PRESSURE_RE as _APY_PRESSURE_RE
 
 
 def _find_markers(text: str, pattern: re.Pattern) -> List[str]:
