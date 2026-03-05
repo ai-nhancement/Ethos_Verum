@@ -296,60 +296,129 @@ _REQUIRES_FIRST_PERSON: set = {
 # Per-value context-window disqualifiers.  If the pattern matches the 160-char
 # window around the keyword, the signal is dropped regardless of first-person.
 _DISQUALIFIERS: Dict[str, re.Pattern] = {
-    # "my patient recovered" / "the patient was" — medical noun, not the virtue
+    # "my patient recovered" / "the patient was" -- medical noun, not the virtue
     "patience": re.compile(
         r"\b(?:my|the|his|her|their|a|our)\s+patients?\s+\b",
         re.IGNORECASE,
     ),
-    # "fair weather", "fair hair", "fair trade" — adjective, not the value
+    # "fair weather", "fair hair", "fair trade" -- adjective, not the value
     "fairness": re.compile(
         r"\bfair\s+(?:weather|wind|sky|skies|hair|skin|complexion|use|trade|market)\b",
         re.IGNORECASE,
     ),
-    # "to be honest though / with you" — filler phrase, not an integrity claim
+    # "to be honest though / with you" -- filler phrase, not an integrity claim
     "integrity": re.compile(
         r"\bto\s+be\s+honest\s*(?:,|\bthough\b|\bwith\s+you\b|\bI\s+don['\u2019]t\b|\babout\s+my\s+(?:schedule|day|week|plans?)\b)",
         re.IGNORECASE,
     ),
-    # "devoted time/energy/attention" — effort allocation, not loyalty
+    # "devoted time/energy/attention" -- effort allocation, not loyalty
     "loyalty": re.compile(
         r"\bdevoted?\s+(?:\w+\s+){0,2}(?:time|hours|energy|attention|resources|effort|efforts)\b",
         re.IGNORECASE,
     ),
-    # "love pizza/coffee/sports/movies/music/food/this/that" — preference, not bond
+    # "love pizza/coffee/sports/movies/music" -- preference, not bond
     "love": re.compile(
-        r"\b(?:I\s+)?love\s+(?:pizza|coffee|tea|beer|wine|food|sports?|movies?|music|games?|this|that|it|them)\b",
+        r"\b(?:I\s+)?loves?\s+(?:pizza|coffee|tea|beer|wine|food|sports?|movies?|music|games?|this|that|it|them)\b",
+        re.IGNORECASE,
+    ),
+    # "survived/recovered from surgery/cancer/treatment" -- medical, not moral resilience
+    "resilience": re.compile(
+        r"\b(?:survived?|recovered?)\s+(?:from\s+)?(?:surgery|cancer|the\s+operation|chemotherapy|"
+        r"the\s+procedure|the\s+hospital|the\s+illness|the\s+disease|the\s+infection|the\s+treatment)\b",
+        re.IGNORECASE,
+    ),
+    # "I will call/text/email/meet you" -- scheduling, not moral commitment
+    "commitment": re.compile(
+        r"\bI\s+will\s+(?:call|text|email|send|meet|see\s+you|be\s+there\s+at|arrive|"
+        r"attend\s+the|join\s+the|check|look\s+into)\b",
+        re.IGNORECASE,
+    ),
+    # "responsible for the project/meeting/report" -- task assignment, not moral accountability
+    "responsibility": re.compile(
+        r"\bresponsible\s+for\s+(?:the\s+)?(?:project|meeting|report|presentation|"
+        r"event|campaign|website|design|scheduling|organizing|managing|coordinating)\b",
+        re.IGNORECASE,
+    ),
+    # "thanks for joining/attending" -- courtesy, not deep gratitude
+    "gratitude": re.compile(
+        r"\bthanks?\s+(?:you\s+)?for\s+(?:joining|attending|coming|being\s+here|"
+        r"your\s+time|your\s+participation|your\s+presence|tuning\s+in)\b",
+        re.IGNORECASE,
+    ),
+    # "interested in the position/role/job" -- professional interest, not intellectual curiosity
+    "curiosity": re.compile(
+        r"\binterested\s+in\s+(?:the\s+)?(?:position|role|opportunity|job|opening|vacancy)\b",
+        re.IGNORECASE,
+    ),
+    # "not above the law/average/sea level" -- common idiom, not moral humility
+    "humility": re.compile(
+        r"\bnot\s+above\s+(?:the\s+)?(?:law|average|minimum|maximum|sea\s+level|ground|the\s+rules)\b",
+        re.IGNORECASE,
+    ),
+    # "put on a brave face" -- mask/performance, not genuine courage
+    "courage": re.compile(
+        r"\bbrave\s+face\b",
+        re.IGNORECASE,
+    ),
+    # "moved by the performance/film/music" -- aesthetic emotion, not compassion for suffering
+    "compassion": re.compile(
+        r"\bmoved\s+by\s+(?:the\s+)?(?:performance|film|movie|music|song|score|concert|play|book|story)\b",
         re.IGNORECASE,
     ),
 }
 
 
-def _is_valid_signal(text_lower: str, value_name: str, kw: str, match_idx: int) -> bool:
+def _check_signal(
+    text_lower: str,
+    value_name: str,
+    kw: str,
+    match_idx: int,
+    doc_type: str = "unknown",
+):
     """
-    Returns False if the keyword hit is likely a false positive.
+    Returns (is_valid: bool, confidence: float) for a keyword hit.
 
-    Check 1 — per-value disqualifier pattern on the 160-char context window.
-    Check 2 — first-person proximity: for values in _REQUIRES_FIRST_PERSON,
-               at least one I/me/my must appear within ±80 chars of the match.
+    Check 1 - per-value disqualifier on 160-char context window (drops outright).
+    Check 2 - first-person proximity for values in _REQUIRES_FIRST_PERSON;
+              bypassed when doc_type == 'action' (biographical text, third-person valid).
 
-    Never raises.
+    Confidence:
+      1.0  first-person pronoun found in context window (strong self-attribution)
+      0.7  action doc, first-person not required (biographical third-person)
+      0.6  non-required value, no first-person found (weak but accepted)
+
+    Never raises; fail-open returns (True, 1.0).
     """
     try:
         ctx_start = max(0, match_idx - 80)
-        ctx_end = min(len(text_lower), match_idx + len(kw) + 80)
-        ctx = text_lower[ctx_start:ctx_end]
+        ctx_end   = min(len(text_lower), match_idx + len(kw) + 80)
+        ctx       = text_lower[ctx_start:ctx_end]
 
+        # Check 1: disqualifier -- overlap-based: only block if the disqualifier
+        # match overlaps with the actual keyword position (not just nearby text).
         disq = _DISQUALIFIERS.get(value_name)
-        if disq and disq.search(ctx):
-            return False
+        if disq:
+            kw_end = match_idx + len(kw)
+            for m in disq.finditer(text_lower):
+                if m.start() < kw_end and m.end() > match_idx:
+                    return False, 0.0
+
+        # Check 2: first-person proximity
+        is_action = (doc_type or "").lower().strip() == "action"
+        has_fp    = bool(_FIRST_PERSON_RE.search(ctx))
 
         if value_name in _REQUIRES_FIRST_PERSON:
-            if not _FIRST_PERSON_RE.search(ctx):
-                return False
+            if not has_fp and not is_action:
+                return False, 0.0
+            conf = 1.0 if has_fp else 0.7   # action doc bypass: 0.7
+        else:
+            conf = 1.0 if has_fp else 0.6   # third-person accepted, lower confidence
 
-        return True
+        return True, conf
+
     except Exception:
-        return True  # fail-open: if check errors, allow the signal
+        return True, 1.0  # fail-open
+
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +466,7 @@ def _run_extraction(session_id: str) -> int:
             latest_ts = max(latest_ts, ts)
             continue
 
-        signals = extract_value_signals(text, record_id, significance)
+        signals = extract_value_signals(text, record_id, significance, doc_type)
         for sig in signals:
             resistance = compute_resistance(text, significance, doc_type)
             if resistance < cfg.min_resistance_threshold:
@@ -445,10 +514,11 @@ def extract_value_signals(
     text: str,
     record_id: str,
     significance: float,
+    doc_type: str = "unknown",
 ) -> List[Dict]:
     """
-    Keyword-scan text against VALUE_VOCAB (case-insensitive substring).
-    Returns a list of {value_name, text_excerpt, significance} dicts.
+    Keyword-scan text against VALUE_VOCAB with disambiguation filter.
+    Returns a list of {value_name, text_excerpt, significance, disambiguation_confidence} dicts.
     """
     if not text:
         return []
@@ -466,14 +536,15 @@ def extract_value_signals(
             idx = text_lower.find(kw.lower())
             if idx < 0:
                 continue
-            if not _is_valid_signal(text_lower, value_name, kw, idx):
+            valid, conf = _check_signal(text_lower, value_name, kw, idx, doc_type)
+            if not valid:
                 continue  # try next keyword for same value before giving up
             excerpt = _extract_excerpt(text, kw, max_len=150)
             results.append({
                 "value_name": value_name,
                 "text_excerpt": excerpt,
                 "significance": significance,
-                "disambiguation_confidence": 1.0,
+                "disambiguation_confidence": conf,
             })
             seen_values.add(value_name)
             break
