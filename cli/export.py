@@ -32,6 +32,7 @@ Options:
   --output-dir PATH    Output directory (default output/ric/)
   --dry-run            Print classification stats only — no files written
   --no-ambiguous       Exclude AMBIGUOUS observations from per-figure files
+  --min-consistency N  Min registry consistency score [0.0-1.0] to include (default 0.0)
   --db PATH            Path to values.db (default data/values.db)
 """
 
@@ -173,10 +174,14 @@ def _read_figure_observations(
                        vo.id, vo.session_id, vo.record_id, vo.ts,
                        vo.value_name, vo.text_excerpt,
                        vo.significance, vo.resistance,
+                       COALESCE(vo.disambiguation_confidence, 1.0) AS disambiguation_confidence,
                        COALESCE(fs.figure_name, SUBSTR(vo.session_id, 8)) AS figure_name,
-                       COALESCE(fs.document_type, 'unknown')              AS document_type
+                       COALESCE(fs.document_type, 'unknown')              AS document_type,
+                       COALESCE(vr.consistency, 0.5)                      AS observation_consistency
                    FROM value_observations vo
                    LEFT JOIN figure_sources fs ON fs.session_id = vo.session_id
+                   LEFT JOIN value_registry vr
+                       ON vr.session_id = vo.session_id AND vr.value_name = vo.value_name
                    WHERE vo.session_id = ?
                    ORDER BY vo.session_id, vo.ts""",
                 (session_id_filter,),
@@ -187,10 +192,14 @@ def _read_figure_observations(
                        vo.id, vo.session_id, vo.record_id, vo.ts,
                        vo.value_name, vo.text_excerpt,
                        vo.significance, vo.resistance,
+                       COALESCE(vo.disambiguation_confidence, 1.0) AS disambiguation_confidence,
                        COALESCE(fs.figure_name, SUBSTR(vo.session_id, 8)) AS figure_name,
-                       COALESCE(fs.document_type, 'unknown')              AS document_type
+                       COALESCE(fs.document_type, 'unknown')              AS document_type,
+                       COALESCE(vr.consistency, 0.5)                      AS observation_consistency
                    FROM value_observations vo
                    LEFT JOIN figure_sources fs ON fs.session_id = vo.session_id
+                   LEFT JOIN value_registry vr
+                       ON vr.session_id = vo.session_id AND vr.value_name = vo.value_name
                    WHERE vo.session_id LIKE 'figure:%'
                    ORDER BY vo.session_id, vo.ts""",
             ).fetchall()
@@ -208,6 +217,7 @@ def build_training_records(
     p1_threshold: float,
     p0_threshold: float,
     min_observations: int,
+    min_consistency: float = 0.0,
 ) -> List[Dict[str, Any]]:
     obs_count: Dict[Tuple[str, str], int] = defaultdict(int)
     for obs in observations:
@@ -217,6 +227,8 @@ def build_training_records(
 
     for obs in observations:
         if obs_count[(obs["session_id"], obs["value_name"])] < min_observations:
+            continue
+        if float(obs.get("observation_consistency", 0.5)) < min_consistency:
             continue
 
         text_excerpt = str(obs.get("text_excerpt") or "")
@@ -261,7 +273,9 @@ def build_training_records(
             "confidence":       round(confidence, 2),
             "pressure_markers": apy_hits,
             "failure_markers":  failure_hits,
-            "hold_markers":     hold_hits,
+            "hold_markers":             hold_hits,
+            "disambiguation_confidence": round(float(obs.get("disambiguation_confidence", 1.0)), 4),
+            "observation_consistency":   round(float(obs.get("observation_consistency", 0.5)), 4),
         })
 
     return records
@@ -332,6 +346,7 @@ def export(
     output_dir: str = _DEFAULT_OUTPUT_DIR,
     dry_run: bool = False,
     include_ambiguous: bool = True,
+    min_consistency: float = 0.0,
 ) -> int:
     print(f"[export] Reading observations from {db_path}")
     observations = _read_figure_observations(db_path, figure_filter)
@@ -342,10 +357,12 @@ def export(
         return 0
 
     print(f"[export] Found {len(observations)} raw observations")
-    print(f"[export] P1 threshold: resistance >= {p1_threshold}")
+    print(f"[export] P1 threshold:    resistance >= {p1_threshold}")
+    if min_consistency > 0.0:
+        print(f"[export] Min consistency: {min_consistency}")
     print(f"[export] P0 threshold: resistance <  {p0_threshold}")
 
-    records = build_training_records(observations, p1_threshold, p0_threshold, min_observations)
+    records = build_training_records(observations, p1_threshold, p0_threshold, min_observations, min_consistency)
     _print_stats(records, label="Classification results")
 
     positive  = [r for r in records if r["label"] == "P1"]
@@ -480,6 +497,8 @@ def main() -> int:
                         help="Print stats only — no files written")
     parser.add_argument("--no-ambiguous", action="store_true",
                         help="Exclude AMBIGUOUS observations from per-figure files")
+    parser.add_argument("--min-consistency", type=float, default=0.0,
+                        help="Min registry consistency score to include (default 0.0)")
     parser.add_argument("--db", default=_VALUES_DB,
                         help=f"Path to values.db (default {_VALUES_DB})")
     args = parser.parse_args()
@@ -493,6 +512,7 @@ def main() -> int:
         output_dir=args.output_dir,
         dry_run=args.dry_run,
         include_ambiguous=not args.no_ambiguous,
+        min_consistency=args.min_consistency,
     )
     return 0
 

@@ -69,7 +69,8 @@ class ValueStore:
                 text_excerpt              TEXT NOT NULL DEFAULT '',
                 significance              REAL NOT NULL DEFAULT 0.0,
                 resistance                REAL NOT NULL DEFAULT 0.5,
-                disambiguation_confidence REAL NOT NULL DEFAULT 1.0
+                disambiguation_confidence REAL NOT NULL DEFAULT 1.0,
+                doc_type                  TEXT NOT NULL DEFAULT 'unknown'
             );
             CREATE INDEX IF NOT EXISTS idx_vobs_session
                 ON value_observations(session_id, ts);
@@ -114,6 +115,13 @@ class ValueStore:
             conn.commit()
         except Exception:
             pass  # Column already exists
+        try:
+            conn.execute(
+                "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'"
+            )
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
 
     # ------------------------------------------------------------------
     # Observations (append-only)
@@ -130,6 +138,7 @@ class ValueStore:
         significance: float,
         resistance: float,
         disambiguation_confidence: float = 1.0,
+        doc_type: str = "unknown",
     ) -> str:
         uid = str(uuid.uuid4())
         try:
@@ -137,11 +146,11 @@ class ValueStore:
             conn.execute(
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
-                    text_excerpt, significance, resistance, disambiguation_confidence)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    text_excerpt, significance, resistance, disambiguation_confidence, doc_type)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, session_id, turn_id, record_id, ts, value_name,
                  text_excerpt[:200], float(significance), float(resistance),
-                 float(disambiguation_confidence)),
+                 float(disambiguation_confidence), str(doc_type or "unknown")),
             )
             conn.commit()
         except Exception:
@@ -185,6 +194,7 @@ class ValueStore:
         significance: float,
         resistance: float,
         ts: float,
+        doc_type: str = "unknown",
     ) -> None:
         try:
             conn = self._conn()
@@ -213,7 +223,7 @@ class ValueStore:
                 prev_res = float(row["avg_resistance"])
                 new_sig = prev_sig + (float(significance) - prev_sig) / n
                 new_res = prev_res + (float(resistance) - prev_res) / n
-                consistency = _compute_consistency(conn, session_id, value_name, resistance)
+                consistency = _compute_consistency(conn, session_id, value_name, resistance, ts, str(doc_type or "unknown"))
                 weight = round(n * new_sig * new_res * consistency, 4)
                 conn.execute(
                     """UPDATE value_registry SET
@@ -397,23 +407,60 @@ def _compute_consistency(
     session_id: str,
     value_name: str,
     new_resistance: float,
+    new_ts: float,
+    new_doc_type: str = "unknown",
 ) -> float:
+    """
+    Four-component consistency score for a (session_id, value_name) pair.
+
+    Components (paper §7.9):
+      0.30 × min(1, n / 10)                  — observation volume (saturates at 10)
+      0.30 × max(0, 1 − σ_r / 0.40)          — resistance stability (low variance → high)
+      0.25 × min(1, span_s / 31_536_000)     — temporal spread (saturates at 1 year)
+      0.15 × min(1, distinct_doc_types / 3)  — source diversity (saturates at 3 types)
+
+    The new observation (not yet committed) is included in the calculation.
+    Never raises — returns 0.5 on any error.
+    """
     try:
         rows = conn.execute(
-            "SELECT resistance FROM value_observations WHERE session_id=? AND value_name=?",
+            "SELECT resistance, ts, doc_type FROM value_observations "
+            "WHERE session_id=? AND value_name=?",
             (session_id, value_name),
         ).fetchall()
-        values = [float(r[0]) for r in rows] + [new_resistance]
-        n = len(values)
-        if n < 2:
-            return 0.5
-        mean = sum(values) / n
-        if mean == 0.0:
-            return 0.5
-        variance = sum((v - mean) ** 2 for v in values) / n
-        std_dev = math.sqrt(variance)
-        consistency = 1.0 - (std_dev / mean)
-        return max(0.0, min(1.0, consistency))
+
+        resistances = [float(r[0]) for r in rows] + [new_resistance]
+        timestamps  = [float(r[1]) for r in rows] + [new_ts]
+        doc_types   = {str(r[2]) for r in rows} | {new_doc_type}
+
+        n = len(resistances)
+
+        # Component 1: observation volume
+        vol = min(1.0, n / 10.0)
+
+        # Component 2: resistance stability
+        mean_r = sum(resistances) / n
+        if mean_r == 0.0 or n < 2:
+            stab = 0.0
+        else:
+            variance = sum((v - mean_r) ** 2 for v in resistances) / n
+            std_dev  = math.sqrt(variance)
+            stab = max(0.0, 1.0 - std_dev / 0.40)
+
+        # Component 3: temporal spread
+        span_s = max(timestamps) - min(timestamps)
+        spread = min(1.0, span_s / 31_536_000.0)  # saturates at 1 year
+
+        # Component 4: source diversity
+        diversity = min(1.0, len(doc_types) / 3.0)  # saturates at 3 types
+
+        consistency = min(1.0,
+            0.30 * vol      +
+            0.30 * stab     +
+            0.25 * spread   +
+            0.15 * diversity
+        )
+        return round(max(0.0, consistency), 4)
     except Exception:
         return 0.5
 

@@ -505,6 +505,7 @@ def _run_extraction(session_id: str) -> int:
                 significance=significance,
                 resistance=resistance,
                 disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
+                doc_type=doc_type,
             )
             val_store.upsert_registry(
                 session_id=session_id,
@@ -512,6 +513,7 @@ def _run_extraction(session_id: str) -> int:
                 significance=significance,
                 resistance=resistance,
                 ts=ts,
+                doc_type=doc_type,
             )
             # Cross-figure aggregate (session_id='')
             val_store.upsert_registry(
@@ -520,6 +522,7 @@ def _run_extraction(session_id: str) -> int:
                 significance=significance,
                 resistance=resistance,
                 ts=ts,
+                doc_type=doc_type,
             )
             recorded += 1
 
