@@ -209,6 +209,36 @@ def _read_figure_observations(
 
 
 # ---------------------------------------------------------------------------
+# APY context loader (cross-passage pressure window)
+# ---------------------------------------------------------------------------
+
+def _load_apy_context(db_path: str) -> Dict[str, List[Dict]]:
+    """
+    Load all apy_context rows grouped by session_id.
+    Returns {session_id: [{record_id, ts, passage_idx, markers}, ...]}.
+    """
+    result: Dict[str, List[Dict]] = defaultdict(list)
+    if not Path(db_path).exists():
+        return result
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT session_id, record_id, ts, passage_idx, markers FROM apy_context"
+            ).fetchall()
+            for r in rows:
+                result[r["session_id"]].append(dict(r))
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Build training records
 # ---------------------------------------------------------------------------
 
@@ -218,6 +248,9 @@ def build_training_records(
     p0_threshold: float,
     min_observations: int,
     min_consistency: float = 0.0,
+    apy_context: Optional[Dict[str, List[Dict]]] = None,
+    apy_passage_window: int = 5,
+    apy_time_window_s: float = 259200.0,  # 72 hours
 ) -> List[Dict[str, Any]]:
     obs_count: Dict[Tuple[str, str], int] = defaultdict(int)
     for obs in observations:
@@ -242,6 +275,39 @@ def build_training_records(
         failure_hits = _find_markers(text_excerpt, _FAILURE_RE)
         hold_hits    = _find_markers(text_excerpt, _HOLD_RE)
         apy_hits     = _find_markers(text_excerpt, _APY_PRESSURE_RE)
+
+        # ── Cross-passage APY upgrade ─────────────────────────────────────
+        # If this passage was classified P0 (failure, no same-passage pressure)
+        # check the APY context window for a recent pressure passage.
+        pressure_source_id  = ""
+        deferred_apy_lag_s  = 0.0
+        deferred_apy_lag_n  = 0
+        if label == "P0" and apy_context:
+            sess_ctx = apy_context.get(obs.get("session_id", ""), [])
+            obs_ts   = float(obs.get("ts", 0.0))
+            obs_pidx = int(obs.get("_passage_idx", -1))  # -1 if not tracked
+            for ctx_entry in sess_ctx:
+                ctx_ts   = float(ctx_entry.get("ts", 0.0))
+                ctx_pidx = int(ctx_entry.get("passage_idx", -1))
+                # Skip context entries that come AFTER this passage
+                if ctx_ts > obs_ts:
+                    continue
+                # Check time window (dated) or passage window (undated)
+                within_time = (obs_ts - ctx_ts) <= apy_time_window_s
+                within_passages = (
+                    obs_pidx >= 0
+                    and ctx_pidx >= 0
+                    and (obs_pidx - ctx_pidx) <= apy_passage_window
+                )
+                if within_time or within_passages:
+                    # Promote to cross-passage APY
+                    label              = "APY"
+                    reason             = "cross_passage_apy_pressure_context"
+                    confidence         = 0.85
+                    pressure_source_id = str(ctx_entry.get("record_id", ""))
+                    deferred_apy_lag_s = round(obs_ts - ctx_ts, 1)
+                    deferred_apy_lag_n = max(0, obs_pidx - ctx_pidx) if obs_pidx >= 0 and ctx_pidx >= 0 else 0
+                    break  # Use the most recent (first in DESC order) qualifying entry
 
         fail_mode = ""
         if label == "APY":
@@ -276,6 +342,9 @@ def build_training_records(
             "hold_markers":             hold_hits,
             "disambiguation_confidence": round(float(obs.get("disambiguation_confidence", 1.0)), 4),
             "observation_consistency":   round(float(obs.get("observation_consistency", 0.5)), 4),
+            "pressure_source_id":        pressure_source_id,
+            "deferred_apy_lag_s":        deferred_apy_lag_s,
+            "deferred_apy_lag_n":        deferred_apy_lag_n,
         })
 
     return records
@@ -362,7 +431,11 @@ def export(
         print(f"[export] Min consistency: {min_consistency}")
     print(f"[export] P0 threshold: resistance <  {p0_threshold}")
 
-    records = build_training_records(observations, p1_threshold, p0_threshold, min_observations, min_consistency)
+    apy_ctx = _load_apy_context(db_path)
+    records = build_training_records(
+        observations, p1_threshold, p0_threshold, min_observations, min_consistency,
+        apy_context=apy_ctx,
+    )
     _print_stats(records, label="Classification results")
 
     positive  = [r for r in records if r["label"] == "P1"]

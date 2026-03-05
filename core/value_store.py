@@ -105,6 +105,17 @@ class ValueStore:
                 ingested_at   REAL NOT NULL,
                 passage_count INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS apy_context (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL DEFAULT '',
+                record_id    TEXT NOT NULL DEFAULT '',
+                ts           REAL NOT NULL,
+                passage_idx  INTEGER NOT NULL DEFAULT 0,
+                markers      TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_apyctx_session
+                ON apy_context(session_id, ts DESC);
         """)
         conn.commit()
         # Migration: add column to existing DBs (SQLite ignores if already present via try/except)
@@ -398,6 +409,98 @@ class ValueStore:
         except Exception:
             return {"total_observations": 0, "top_values": [], "figure_count": 0}
 
+    # ------------------------------------------------------------------
+    # APY Context (cross-passage pressure window)
+    # ------------------------------------------------------------------
+
+    def write_apy_context(
+        self,
+        session_id: str,
+        record_id: str,
+        ts: float,
+        passage_idx: int,
+        markers: str,
+        window_n: int = 5,
+    ) -> None:
+        """Write a pressure context entry and prune to the N most recent."""
+        import uuid as _uuid
+        try:
+            conn = self._conn()
+            conn.execute(
+                """INSERT OR REPLACE INTO apy_context
+                   (id, session_id, record_id, ts, passage_idx, markers)
+                   VALUES (?,?,?,?,?,?)""",
+                (str(_uuid.uuid4()), session_id, record_id, float(ts),
+                 int(passage_idx), str(markers)),
+            )
+            # Prune: keep only the N most recent by passage_idx
+            conn.execute(
+                """DELETE FROM apy_context
+                   WHERE session_id=?
+                   AND id NOT IN (
+                       SELECT id FROM apy_context
+                       WHERE session_id=?
+                       ORDER BY passage_idx DESC, ts DESC
+                       LIMIT ?
+                   )""",
+                (session_id, session_id, int(window_n)),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
+    def get_apy_context(
+        self,
+        session_id: str,
+        since_passage_idx: int = -1,   # -1 = no passage filter
+        since_ts: float = 0.0,         # 0.0 = no ts filter
+    ) -> List[Dict]:
+        """Return recent pressure context entries for a session.
+
+        Each non-default filter is ANDed; when both are non-default they are OR'd.
+        """
+        try:
+            conn = self._conn()
+            clauses: list = ["session_id=?"]
+            params: list = [session_id]
+            sub: list = []
+            if since_passage_idx >= 0:
+                sub.append("passage_idx >= ?")
+                params.append(int(since_passage_idx))
+            if since_ts > 0.0:
+                sub.append("ts >= ?")
+                params.append(float(since_ts))
+            if sub:
+                clauses.append("(" + " OR ".join(sub) + ")")
+            where = " AND ".join(clauses)
+            rows = conn.execute(
+                f"SELECT record_id, ts, passage_idx, markers "
+                f"FROM apy_context WHERE {where} ORDER BY passage_idx DESC",
+                params,
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def prune_apy_context(self, session_id: str, keep_n: int = 5) -> None:
+        """Keep only the N most recent pressure context entries."""
+        try:
+            conn = self._conn()
+            conn.execute(
+                """DELETE FROM apy_context
+                   WHERE session_id=?
+                   AND id NOT IN (
+                       SELECT id FROM apy_context
+                       WHERE session_id=?
+                       ORDER BY passage_idx DESC, ts DESC
+                       LIMIT ?
+                   )""",
+                (session_id, session_id, int(keep_n)),
+            )
+            conn.commit()
+        except Exception:
+            pass
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -464,6 +567,7 @@ def _compute_consistency(
         return round(max(0.0, consistency), 4)
     except Exception:
         return 0.5
+
 
 
 # ------------------------------------------------------------------

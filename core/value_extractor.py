@@ -23,6 +23,17 @@ from __future__ import annotations
 
 import re
 import time
+import re as _re
+
+# APY pressure pattern — mirrors cli/export._APY_PRESSURE_RE (kept in sync manually)
+_APY_PRESSURE_RE_INGEST = _re.compile(
+    r'\b(under pressure|when pressed|when threatened|when they demanded|'
+    r'to avoid punishment|to save myself|to protect my position|'
+    r'they insisted|they demanded|forced to|compelled to|'
+    r'or face consequences|or be punished|or lose everything|'
+    r'i told them what they wanted to hear|said what was expected)\b',
+    _re.IGNORECASE,
+)
 from typing import Dict, List
 
 from core.config import get_config
@@ -477,6 +488,8 @@ def _run_extraction(session_id: str) -> int:
     recorded = 0
     now = time.time()
     latest_ts = watermark
+    _passage_idx = 0
+    _apy_window_n = cfg.__dict__.get('apy_context_window_n', 5)
 
     for row in passages[:_MAX_PASSAGES_PER_RUN]:
         text = str(row["text"])
@@ -526,6 +539,18 @@ def _run_extraction(session_id: str) -> int:
             )
             recorded += 1
 
+        # Write APY pressure context if this passage has pressure markers
+        apy_markers = [m.group(0).lower() for m in _APY_PRESSURE_RE_INGEST.finditer(text)]
+        if apy_markers:
+            val_store.write_apy_context(
+                session_id=session_id,
+                record_id=record_id,
+                ts=ts,
+                passage_idx=_passage_idx,
+                markers=', '.join(apy_markers),
+                window_n=_apy_window_n,
+            )
+        _passage_idx += 1
         latest_ts = max(latest_ts, ts)
 
     doc_store.set_watermark(session_id, latest_ts if latest_ts > watermark else now)
