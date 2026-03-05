@@ -52,6 +52,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
+from core.config import is_tension_pair
 
 _VALUES_DB = str(_ROOT / "data" / "values.db")
 _DEFAULT_OUTPUT_DIR = str(_ROOT / "output" / "ric")
@@ -232,6 +233,127 @@ def _load_apy_context(db_path: str) -> Dict[str, List[Dict]]:
 
 
 # ---------------------------------------------------------------------------
+# Co-occurrence matrix
+# ---------------------------------------------------------------------------
+
+def _compute_cooccurrence(
+    records: List[Dict[str, Any]],
+) -> Dict[str, Dict]:
+    """
+    Build a co-occurrence matrix for all unordered value pairs (C(15,2) = 105 max).
+
+    Groups records by (session_id, record_id) to find passages with 2+ values.
+    For each pair counts: both_detected, both_p1, mixed (one P1/one not), both_p0.
+    Returns {"V1||V2": {"both_detected": n, "both_p1": n, "mixed": n, "both_p0": n}}.
+    """
+    from itertools import combinations
+
+    passages: Dict[str, List[Dict]] = defaultdict(list)
+    for r in records:
+        key = r["session_id"] + "||" + r["record_id"]
+        passages[key].append(r)
+
+    matrix: Dict[str, Dict] = {}
+    for recs in passages.values():
+        if len(recs) < 2:
+            continue
+        for r1, r2 in combinations(recs, 2):
+            v1, v2 = sorted([r1["value_name"], r2["value_name"]])
+            pair_key = f"{v1}||{v2}"
+            if pair_key not in matrix:
+                matrix[pair_key] = {"both_detected": 0, "both_p1": 0, "mixed": 0, "both_p0": 0}
+            entry = matrix[pair_key]
+            entry["both_detected"] += 1
+            r1_pos = (r1["label"] == "P1")
+            r2_pos = (r2["label"] == "P1")
+            if r1_pos and r2_pos:
+                entry["both_p1"] += 1
+            elif not r1_pos and not r2_pos:
+                entry["both_p0"] += 1
+            else:
+                entry["mixed"] += 1
+
+    return dict(sorted(matrix.items(), key=lambda kv: -kv[1]["both_detected"]))
+
+
+# ---------------------------------------------------------------------------
+# Value tension detection
+# ---------------------------------------------------------------------------
+
+def _detect_tensions(
+    records: List[Dict[str, Any]],
+    db_path: str,
+) -> List[Dict[str, Any]]:
+    """
+    Detect value tension events: two tension-pair values in the same passage
+    where one is P1 and the other is P0/APY.
+
+    Persists events to value_tension table. Returns list for JSONL export.
+    Tension events carry 1.5× training weight per spec.
+    """
+    from itertools import combinations
+    import sqlite3 as _sql3
+    import uuid as _uuid
+
+    passages: Dict[str, List[Dict]] = defaultdict(list)
+    for r in records:
+        key = r["session_id"] + "||" + r["record_id"]
+        passages[key].append(r)
+
+    events: List[Dict[str, Any]] = []
+
+    try:
+        conn = _sql3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL")
+        for recs in passages.values():
+            if len(recs) < 2:
+                continue
+            for r1, r2 in combinations(recs, 2):
+                if not is_tension_pair(r1["value_name"], r2["value_name"]):
+                    continue
+                r1_pos = (r1["label"] == "P1")
+                r2_pos = (r2["label"] == "P1")
+                if r1_pos == r2_pos:
+                    continue  # both same direction
+                held   = r1 if r1_pos else r2
+                failed = r2 if r1_pos else r1
+                uid = str(_uuid.uuid4())
+                event = {
+                    "id":             uid,
+                    "session_id":     held["session_id"],
+                    "record_id":      held["record_id"],
+                    "ts":             held["ts"],
+                    "figure":         held["figure"],
+                    "value_held":     held["value_name"],
+                    "value_failed":   failed["value_name"],
+                    "resistance":     round(float(held.get("resistance", 0.0)), 4),
+                    "text_excerpt":   str(held.get("text_excerpt", ""))[:300],
+                    "held_label":     held["label"],
+                    "failed_label":   failed["label"],
+                    "training_weight": round(float(held.get("training_weight", 1.0)) * 1.5, 4),
+                }
+                events.append(event)
+                try:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO value_tension
+                           (id, session_id, record_id, ts, value_held, value_failed,
+                            resistance, text_excerpt)
+                           VALUES (?,?,?,?,?,?,?,?)""",
+                        (uid, event["session_id"], event["record_id"], float(event["ts"]),
+                         event["value_held"], event["value_failed"],
+                         event["resistance"], event["text_excerpt"]),
+                    )
+                except Exception:
+                    pass
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    return events
+
+
+# ---------------------------------------------------------------------------
 # Build training records
 # ---------------------------------------------------------------------------
 
@@ -409,6 +531,7 @@ def export(
     dry_run: bool = False,
     include_ambiguous: bool = True,
     min_consistency: float = 0.0,
+    value_tension: bool = False,
 ) -> int:
     print(f"[export] Reading observations from {db_path}")
     observations = _read_figure_observations(db_path, figure_filter)
@@ -527,6 +650,23 @@ def export(
         },
     }
 
+    # Co-occurrence matrix (always computed, added to report)
+    cooccurrence = _compute_cooccurrence(records)
+    report["co_occurrence"] = cooccurrence
+    print(f"[export] Co-occurrence: {len(cooccurrence)} value pairs co-observed")
+
+    # Value tension detection (opt-in via --value-tension)
+    if value_tension and not dry_run:
+        tension_events = _detect_tensions(records, db_path)
+        if tension_events:
+            tension_path = os.path.join(output_dir, "ric_value_tensions.jsonl")
+            n_t = _write_jsonl(tension_path, tension_events)
+            print(f"[export] Tensions  {n_t:>4} events   -> {tension_path}")
+            report["output_files"]["tensions"] = tension_path
+            report["tension_events"] = len(tension_events)
+        else:
+            print("[export] Tensions: none detected")
+
     report_path = os.path.join(output_dir, "ric_historical_report.json")
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
@@ -567,6 +707,8 @@ def main() -> int:
                         help="Min registry consistency score to include (default 0.0)")
     parser.add_argument("--db", default=_VALUES_DB,
                         help=f"Path to values.db (default {_VALUES_DB})")
+    parser.add_argument("--value-tension", action="store_true",
+                        help="Detect and export value tension events to ric_value_tensions.jsonl")
     args = parser.parse_args()
 
     export(
@@ -579,6 +721,7 @@ def main() -> int:
         dry_run=args.dry_run,
         include_ambiguous=not args.no_ambiguous,
         min_consistency=args.min_consistency,
+        value_tension=args.value_tension,
     )
     return 0
 

@@ -106,6 +106,19 @@ class ValueStore:
                 passage_count INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS value_tension (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL DEFAULT '',
+                record_id    TEXT NOT NULL DEFAULT '',
+                ts           REAL NOT NULL,
+                value_held   TEXT NOT NULL,
+                value_failed TEXT NOT NULL,
+                resistance   REAL NOT NULL DEFAULT 0.0,
+                text_excerpt TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_vtension_session
+                ON value_tension(session_id, ts DESC);
+
             CREATE TABLE IF NOT EXISTS apy_context (
                 id           TEXT PRIMARY KEY,
                 session_id   TEXT NOT NULL DEFAULT '',
@@ -408,6 +421,56 @@ class ValueStore:
             }
         except Exception:
             return {"total_observations": 0, "top_values": [], "figure_count": 0}
+
+    # ------------------------------------------------------------------
+    # Value Tension (co-occurrence interaction events)
+    # ------------------------------------------------------------------
+
+    def record_tension(
+        self,
+        session_id: str,
+        record_id: str,
+        ts: float,
+        value_held: str,
+        value_failed: str,
+        resistance: float,
+        text_excerpt: str,
+    ) -> str:
+        uid = str(uuid.uuid4())
+        try:
+            conn = self._conn()
+            conn.execute(
+                """INSERT OR IGNORE INTO value_tension
+                   (id, session_id, record_id, ts, value_held, value_failed,
+                    resistance, text_excerpt)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (uid, session_id, record_id, float(ts),
+                 str(value_held), str(value_failed),
+                 float(resistance), str(text_excerpt)[:300]),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return uid
+
+    def get_tensions(
+        self,
+        session_id: Optional[str] = None,
+    ) -> List[Dict]:
+        try:
+            conn = self._conn()
+            if session_id:
+                rows = conn.execute(
+                    "SELECT * FROM value_tension WHERE session_id=? ORDER BY ts",
+                    (session_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM value_tension ORDER BY ts"
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # APY Context (cross-passage pressure window)
