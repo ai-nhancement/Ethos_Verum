@@ -60,15 +60,16 @@ class ValueStore:
         conn = self._conn()
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS value_observations (
-                id           TEXT PRIMARY KEY,
-                session_id   TEXT NOT NULL DEFAULT '',
-                turn_id      TEXT NOT NULL DEFAULT '',
-                record_id    TEXT NOT NULL DEFAULT '',
-                ts           REAL NOT NULL,
-                value_name   TEXT NOT NULL,
-                text_excerpt TEXT NOT NULL DEFAULT '',
-                significance REAL NOT NULL DEFAULT 0.0,
-                resistance   REAL NOT NULL DEFAULT 0.5
+                id                        TEXT PRIMARY KEY,
+                session_id                TEXT NOT NULL DEFAULT '',
+                turn_id                   TEXT NOT NULL DEFAULT '',
+                record_id                 TEXT NOT NULL DEFAULT '',
+                ts                        REAL NOT NULL,
+                value_name                TEXT NOT NULL,
+                text_excerpt              TEXT NOT NULL DEFAULT '',
+                significance              REAL NOT NULL DEFAULT 0.0,
+                resistance                REAL NOT NULL DEFAULT 0.5,
+                disambiguation_confidence REAL NOT NULL DEFAULT 1.0
             );
             CREATE INDEX IF NOT EXISTS idx_vobs_session
                 ON value_observations(session_id, ts);
@@ -105,6 +106,14 @@ class ValueStore:
             );
         """)
         conn.commit()
+        # Migration: add column to existing DBs (SQLite ignores if already present via try/except)
+        try:
+            conn.execute(
+                "ALTER TABLE value_observations ADD COLUMN disambiguation_confidence REAL NOT NULL DEFAULT 1.0"
+            )
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
 
     # ------------------------------------------------------------------
     # Observations (append-only)
@@ -120,6 +129,7 @@ class ValueStore:
         text_excerpt: str,
         significance: float,
         resistance: float,
+        disambiguation_confidence: float = 1.0,
     ) -> str:
         uid = str(uuid.uuid4())
         try:
@@ -127,10 +137,11 @@ class ValueStore:
             conn.execute(
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
-                    text_excerpt, significance, resistance)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                    text_excerpt, significance, resistance, disambiguation_confidence)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (uid, session_id, turn_id, record_id, ts, value_name,
-                 text_excerpt[:200], float(significance), float(resistance)),
+                 text_excerpt[:200], float(significance), float(resistance),
+                 float(disambiguation_confidence)),
             )
             conn.commit()
         except Exception:

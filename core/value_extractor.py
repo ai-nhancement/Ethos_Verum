@@ -21,6 +21,7 @@ Constitutional invariants:
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Dict, List
 
@@ -270,6 +271,86 @@ VALUE_VOCAB: Dict[str, List[str]] = {
 _MIN_KEYWORD_LEN = 3
 _MAX_PASSAGES_PER_RUN = 200
 
+# ---------------------------------------------------------------------------
+# Disambiguation — §7.7
+# ---------------------------------------------------------------------------
+
+# Compiled regex for first-person pronouns.
+_FIRST_PERSON_RE = re.compile(r"\b(I|me|my|myself|we|our|us)\b", re.IGNORECASE)
+
+# Values where a first-person pronoun must appear within ±80 chars of the
+# keyword. Values NOT in this set (compassion, fairness, gratitude, love,
+# loyalty) can legitimately refer to a third party in biographical text.
+_REQUIRES_FIRST_PERSON: set = {
+    "courage",
+    "commitment",
+    "patience",
+    "responsibility",
+    "curiosity",
+    "resilience",
+    "growth",
+    "independence",
+    "humility",
+}
+
+# Per-value context-window disqualifiers.  If the pattern matches the 160-char
+# window around the keyword, the signal is dropped regardless of first-person.
+_DISQUALIFIERS: Dict[str, re.Pattern] = {
+    # "my patient recovered" / "the patient was" — medical noun, not the virtue
+    "patience": re.compile(
+        r"\b(?:my|the|his|her|their|a|our)\s+patients?\s+\b",
+        re.IGNORECASE,
+    ),
+    # "fair weather", "fair hair", "fair trade" — adjective, not the value
+    "fairness": re.compile(
+        r"\bfair\s+(?:weather|wind|sky|skies|hair|skin|complexion|use|trade|market)\b",
+        re.IGNORECASE,
+    ),
+    # "to be honest though / with you" — filler phrase, not an integrity claim
+    "integrity": re.compile(
+        r"\bto\s+be\s+honest\s*(?:,|\bthough\b|\bwith\s+you\b|\bI\s+don['\u2019]t\b|\babout\s+my\s+(?:schedule|day|week|plans?)\b)",
+        re.IGNORECASE,
+    ),
+    # "devoted time/energy/attention" — effort allocation, not loyalty
+    "loyalty": re.compile(
+        r"\bdevoted?\s+(?:\w+\s+){0,2}(?:time|hours|energy|attention|resources|effort|efforts)\b",
+        re.IGNORECASE,
+    ),
+    # "love pizza/coffee/sports/movies/music/food/this/that" — preference, not bond
+    "love": re.compile(
+        r"\b(?:I\s+)?love\s+(?:pizza|coffee|tea|beer|wine|food|sports?|movies?|music|games?|this|that|it|them)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _is_valid_signal(text_lower: str, value_name: str, kw: str, match_idx: int) -> bool:
+    """
+    Returns False if the keyword hit is likely a false positive.
+
+    Check 1 — per-value disqualifier pattern on the 160-char context window.
+    Check 2 — first-person proximity: for values in _REQUIRES_FIRST_PERSON,
+               at least one I/me/my must appear within ±80 chars of the match.
+
+    Never raises.
+    """
+    try:
+        ctx_start = max(0, match_idx - 80)
+        ctx_end = min(len(text_lower), match_idx + len(kw) + 80)
+        ctx = text_lower[ctx_start:ctx_end]
+
+        disq = _DISQUALIFIERS.get(value_name)
+        if disq and disq.search(ctx):
+            return False
+
+        if value_name in _REQUIRES_FIRST_PERSON:
+            if not _FIRST_PERSON_RE.search(ctx):
+                return False
+
+        return True
+    except Exception:
+        return True  # fail-open: if check errors, allow the signal
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -331,6 +412,7 @@ def _run_extraction(session_id: str) -> int:
                 text_excerpt=sig["text_excerpt"],
                 significance=significance,
                 resistance=resistance,
+                disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
             )
             val_store.upsert_registry(
                 session_id=session_id,
@@ -381,15 +463,20 @@ def extract_value_signals(
         for kw in keywords:
             if len(kw) < _MIN_KEYWORD_LEN:
                 continue
-            if kw.lower() in text_lower:
-                excerpt = _extract_excerpt(text, kw, max_len=150)
-                results.append({
-                    "value_name": value_name,
-                    "text_excerpt": excerpt,
-                    "significance": significance,
-                })
-                seen_values.add(value_name)
-                break
+            idx = text_lower.find(kw.lower())
+            if idx < 0:
+                continue
+            if not _is_valid_signal(text_lower, value_name, kw, idx):
+                continue  # try next keyword for same value before giving up
+            excerpt = _extract_excerpt(text, kw, max_len=150)
+            results.append({
+                "value_name": value_name,
+                "text_excerpt": excerpt,
+                "significance": significance,
+                "disambiguation_confidence": 1.0,
+            })
+            seen_values.add(value_name)
+            break
 
     return results
 
