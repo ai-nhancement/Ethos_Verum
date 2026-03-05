@@ -365,6 +365,135 @@ Systematic expansion of the keyword vocabulary with period-specific and register
 
 For non-English original-language texts, parallel keyword vocabularies in Ancient Greek, Latin, Classical Arabic, Classical Chinese, and Early Modern French and German cover the most common sources in the historical record and provide high-precision original-language matching before the multilingual embedding path.
 
+### 7.6 Cross-Passage APY Detection
+
+The most significant structural limitation of the Phase 0 classification system is architectural, not merely a matter of threshold calibration: APY detection is constrained to a single passage window of 450 characters or fewer.
+
+In documented historical behavior, pressure and response rarely co-occur in a single sentence. The pressure event — a threat, a demand, an ultimatum — typically appears in one passage. The behavioral response appears in a subsequent passage, sometimes weeks or years later. The current `classify_observation()` function requires both an APY pressure marker and a failure marker to appear in the same text excerpt. When they are separated, the APY event is invisible to the pipeline: the pressure passage is classified AMBIGUOUS, the failure passage is classified P0 rather than APY, and the most informative label — that this specific value failed specifically because of external pressure — is lost entirely.
+
+This is not an edge case. Historical APY is structurally cross-passage. Consider: Lincoln documents political pressure in a journal entry; the corresponding policy reversal is documented in a speech weeks later. Nixon documents the fear of exposure in private notes; the corresponding deception occurs in a press conference. The single-passage window catches neither.
+
+The proposed extension maintains a short-term **APY context window** per figure: a rolling buffer of the N most recent passages (configurable; default N=5). When a passage contains APY pressure markers, those markers are written to the figure's context window with a timestamp. When a subsequent passage contains failure markers, the classifier checks whether the context window holds any pressure signal within a configurable age threshold (default: 72 hours for dated materials, 5 passages for undated). If pressure is found, the failure passage is labeled APY rather than P0, and the source pressure passage is referenced by `record_id` in the training record's `pressure_source_id` field.
+
+The data model change is minimal: a `apy_context` table in `values.db` with `(session_id, record_id, ts, markers)`, pruned on each extraction run to retain only the N most recent entries. The classification logic in `cli/export.py` gains a context lookup before the failure-marker branch.
+
+Cross-passage APY detection also enables a new label subclass: **deferred APY** — cases where pressure is applied and the figure resists in the immediate passage but fails in a later one. This temporal gap between pressure and failure is itself informative: figures who hold longer before yielding under sustained pressure demonstrate a meaningfully different value stability profile than those who yield immediately. The `deferred_apy_lag` field (time or passage count between pressure and failure) becomes a training feature in the exported record.
+
+### 7.7 Keyword Context Disambiguation
+
+The Phase 0 keyword vocabulary is a substring match: if the keyword appears anywhere in the passage, the value is detected. This produces a systematic class of false positives that are not recoverable from the resistance formula alone.
+
+The clearest examples arise from value-word uses that are incidental rather than intentional:
+
+- `afraid` appears in the `courage` keyword list. "I was afraid of being late to the meeting" fires a courage detection. No courage is demonstrated; the passage is about scheduling anxiety.
+- `fair` appears in the `fairness` list. "It is fair to say that the weather was poor" fires a fairness detection with no moral content.
+- `patient` appears in the `patience` list. "My patient recovered from surgery" fires as a patience demonstration. The word is used as a noun, not a virtue.
+- `love` appears in the `love` list. "I would love a cup of tea" fires as a love demonstration. The word is used idiomatically.
+- `promise` appears in the `commitment` list. "This promises to be an interesting question" fires a commitment detection with no commitment expressed.
+
+These false positives are not rare corner cases — they are the normal behavior of substring matching against a vocabulary that includes short, polysemous English words. They inflate P1 counts, lower average resistance scores (because the extracted excerpt rarely contains adversity language), and introduce noise into every training record that cites the affected value.
+
+The proposed extension adds a **context disambiguation filter** — a second-pass check applied to any passage that fires on a keyword shorter than a configurable character threshold (default: 12 characters, targeting words like `fair`, `just`, `love`, `brave`, `vow`). The filter checks three conditions in order:
+
+1. **Grammatical role signal:** Does the keyword appear in a pattern consistent with nominal (non-virtue) use? A short list of disqualifying patterns per value catches the most common false-positive forms: `my [value-noun] recovered`, `a [value-noun] of`, `it [value-verb]s to be`, `would [value-verb] [article]`. These are regex-based, deterministic, and require no external model.
+
+2. **First-person grounding:** Is the value expression first-person? A value demonstration requires an agent — the figure must be the one demonstrating the value, not describing someone else's, or using the word abstractly. First-person grounding (`I`, `my`, `me`, `we`, `our`) within a configurable token window of the keyword is a lightweight positive signal. Its absence is not disqualifying — third-person constructions can document demonstrated values — but its presence increases confidence.
+
+3. **Value-relevant action context:** Does the surrounding sentence contain at least one word from a short action-evidence list associated with the value? For `courage`, this includes `stood`, `refused`, `despite`, `pressed`, `faced`. For `fairness`, this includes `judged`, `decided`, `treated`, `owed`, `denied`. Passages with no action-evidence words score lower on an `action_grounding` confidence field added to the observation record.
+
+The filter does not discard low-confidence observations — it flags them. A new `disambiguation_confidence` field in `value_observations` and in the export JSONL ranges from 0.0 to 1.0, where 1.0 means all three conditions passed and 0.0 means the grammatical-role filter fired a probable false positive. Exporters can apply a disambiguation threshold at export time without re-ingesting.
+
+### 7.8 Value Co-occurrence and Interaction Modeling
+
+The Phase 0 pipeline treats the 15 named values as independent dimensions. This reflects a practical decision — it simplifies the extraction loop and the registry schema — but it loses a significant class of behavioral evidence: the relationships between values.
+
+Human moral lives are not independent univariate signals. They are structured by recurring co-occurrences and documented tensions. Courage and integrity co-occur frequently in documented resistance to authority: the same passage that expresses one often expresses the other. Independence and loyalty are frequently in tension: figures who value both leave records of the conflict explicitly. Humility and growth co-occur almost universally in genuine self-reflection passages. Responsibility and courage co-occur in crisis leadership texts. These relationships are not accidents of vocabulary overlap — they reflect real structural features of how human values are expressed and lived.
+
+Modeling co-occurrence at the observation level adds two capabilities:
+
+**Value pair co-occurrence corpus:** The export pipeline gains a `co_occurrence` report: for every ordered pair of values (V₁, V₂), the count of passages in which both were detected, and the rate at which their co-occurrence is P1 (both held), mixed P1/P0 (one held, one failed), or P0 (both failed). A co-occurrence matrix across the 105 unique value pairs produces a behavioral interaction map for each figure and for the cross-figure aggregate.
+
+The behavioral interaction map has direct applications in training data construction: a model that sees examples of integrity-under-pressure as always independent from courage-under-pressure may learn a flatter representation than a model that sees coupled observations where both values were simultaneously tested and both held. The coupled examples are higher-information training records.
+
+**Value tension detection:** When two values that are structurally in tension (independence vs. loyalty, fairness vs. compassion) are both detected in the same passage and one is labeled P1 while the other is labeled P0 or contains failure markers, this is a **value tension event** — a documented case where a figure explicitly prioritized one value over another under pressure. These events are among the most valuable behavioral evidence in the corpus: they reveal value hierarchy, not just value presence.
+
+A `value_tension` table stores these events: `(session_id, record_id, ts, value_held, value_failed, resistance, text_excerpt)`. The export pipeline includes a `--value-tension` flag that outputs a dedicated `ric_value_tensions.jsonl` file. These records carry the highest training weight in the full corpus because they document not just that a value was held, but that holding it required sacrificing another valued outcome.
+
+The tension pair list is researcher-configurable in `core/config.py`. The default pairs, derived from established value theory research (Schwartz, 1992; Rokeach, 1973):
+
+| Value A | Value B | Tension Type |
+|---------|---------|-------------|
+| Independence | Loyalty | Autonomy vs. belonging |
+| Fairness | Compassion | Impartiality vs. mercy |
+| Courage | Patience | Action vs. deliberation |
+| Responsibility | Humility | Ownership vs. deference |
+| Commitment | Growth | Persistence vs. revision |
+
+### 7.9 Observation Stability and Consistency Scoring
+
+The current value registry collapses all observations of a given value for a figure into a single weight scalar, computed by the `upsert_registry()` formula. This scalar encodes the accumulated evidence that a value is present, but it discards the *distribution* of the evidence — which is itself a meaningful quality signal.
+
+Consider two figures, both with a registry weight of 0.68 for `integrity`:
+
+- **Figure A:** 45 integrity observations, resistance scores ranging from 0.41 to 0.92, spread across journals, letters, and speeches, across 30 years of documented life.
+- **Figure B:** 3 integrity observations, all from the same speech, resistance scores 0.55, 0.58, 0.56.
+
+These are not equivalent evidence bases. Figure A's profile represents a behavioral pattern — integrity demonstrated repeatedly, across contexts, across time, at varying levels of cost. Figure B's profile represents three keyword matches in a single public address. The training data derived from each should be weighted differently, and a model trained on both without that distinction will fail to learn what a stable, cross-context value demonstration looks like.
+
+The proposed extension adds a **consistency score** to the value registry, computed at upsert time:
+
+```
+n        = observation count for (session_id, value_name)
+r̄        = mean(resistance_scores)
+σ_r      = stddev(resistance_scores)
+span_s   = max(ts) − min(ts)           (temporal span in seconds)
+doc_types = count(distinct document_types observed)
+
+consistency = min(1.0,
+    0.30 × min(1.0, n / 10)            ← observation volume (saturates at 10)
+  + 0.30 × (1.0 − σ_r / 0.40)         ← resistance stability (low variance = high consistency)
+  + 0.25 × min(1.0, span_s / 31536000) ← temporal spread (saturates at 1 year)
+  + 0.15 × min(1.0, doc_types / 3)     ← source diversity (saturates at 3 types)
+)
+```
+
+This consistency score is stored in `value_registry` as a new `consistency` column and propagated to export JSONL as `observation_consistency`. The export pipeline accepts a `--min-consistency` threshold that excludes low-consistency observations from the training set, enabling a high-quality filtered export without discarding low-consistency observations from the database.
+
+Consistency scoring also surfaces a behavioral analysis capability: figures whose value profiles have high mean consistency are making stable, cross-context behavioral claims. Figures with low consistency but high total weight are making many claims in a narrow context — potentially the signature of a figure whose public persona and private behavior diverge. That divergence pattern, when confirmed by cross-document comparison, is itself high-value training data for models that need to understand the difference between value performance and value embodiment.
+
+### 7.10 SRL Integration: Claim-Level Behavioral Validation
+
+Phase 8 of the Ethos roadmap identifies SRL integration as a conceptual future direction. The architecture is now sufficiently developed to specify it concretely. The integration connects in two directions: Ethos corpus data validates SRL observations; the SRL claim-extraction methodology strengthens Ethos observation quality.
+
+**Direction 1: Corpus-grounded claim validation**
+
+AiMe's `claim_extractor.py` (in `modules/srl/`) decomposes model responses into atomic behavioral claims — assertions about values, facts, or identities. The `ric_gate.py` scores each claim for groundedness (G) against known evidence and calibration (C) against uncertainty signals. Currently, the "known evidence" is AiMe's own ledger: prior user-acknowledged facts and verified information.
+
+Ethos provides an alternative evidence base: documented behavioral patterns from historical figures. When a model claims "I will always be honest with you regardless of consequences," the corpus can surface resistance-scored examples of human figures who made equivalent commitments — and examples of figures who made equivalent commitments and then failed under documented conditions. The claim is not validated against preference data or human ratings, but against the behavioral record of what that commitment actually looked like when tested.
+
+The integration is a lookup API at Ethos's REST layer (Phase 5): `GET /corpus/relevant?claim=<text>&value_name=<value>&label=<P1|P0|APY>`. The claim text is embedded (or matched by keyword) against the value observation corpus. The top matching observations are returned with their labels, resistance scores, figure names, and document types. The RIC gate in AiMe uses these as evidence atoms: matching P1 examples increase groundedness confidence; matching P0/APY examples decrease it.
+
+This connects the two systems without coupling them: Ethos remains a standalone corpus pipeline; AiMe's SRL remains a live behavioral scoring system. The API is the only integration surface.
+
+**Direction 2: Claim-level observation quality scoring**
+
+The SRL methodology itself provides a quality criterion that Ethos currently lacks: *assertion level*. AiMe's `claim_extractor.py` scores assertions on a spectrum from direct first-person behavioral claim ("I will not lie") to hedged statement ("I try to be honest when possible") to reported speech ("He said he valued honesty") to abstract assertion ("Honesty is important"). First-person, direct behavioral claims are the highest-quality value signal; abstract assertions are the lowest.
+
+The Phase 0 keyword vocabulary does not distinguish between these levels. "I will not lie" and "Honesty is important in any democracy" both fire on `integrity` keywords and receive the same treatment. The former is a first-person behavioral commitment; the latter is an editorial sentiment with no behavioral content.
+
+Porting the assertion-level classifier from AiMe's `claim_extractor.py` to a standalone `core/claim_level.py` in Ethos requires extracting the assertion-level detection logic, which is deterministic regex-based rather than LLM-based, preserving Ethos's no-LLM-in-extraction invariant. The extracted module runs as a post-processing step on `extract_value_signals()` output, adding an `assertion_level` field (1–4, where 1 = direct behavioral, 4 = abstract) to each observation. The export pipeline accepts `--max-assertion-level` to exclude abstract assertions from training data.
+
+The combination of assertion level with the existing resistance score produces a more precise behavioral quality metric:
+
+| Assertion Level | High Resistance (≥0.55) | Low Resistance (<0.55) |
+|----------------|------------------------|----------------------|
+| 1 — Direct behavioral | **Highest quality P1/P0 signal** | Claimed but uncosted |
+| 2 — Hedged behavioral | Demonstrated with qualification | Probable AMBIGUOUS |
+| 3 — Reported speech | Third-party attribution, needs corroboration | Weak signal |
+| 4 — Abstract assertion | No behavioral content | Noise |
+
+Level 1 + high resistance is the gold standard for training data. Level 4 + any resistance is noise that the current pipeline promotes to AMBIGUOUS or P1. The assertion level filter converts that noise into a properly labeled low-confidence category.
+
 ---
 
 ## 8. Conclusion

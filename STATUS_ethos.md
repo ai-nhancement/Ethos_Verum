@@ -6,7 +6,7 @@
 >
 > *"We didn't invent values. We extracted them from people who lived them — and people who didn't."*
 
-**Last Updated:** 2026-03-04 — Phase 0 complete. Full standalone pipeline operational: ingest → extract → resistance score → P1/P0/APY classify → JSONL export. Decoupled from AiMe. Zero external dependencies.
+**Last Updated:** 2026-03-05 — Phase 0 complete and operational. PAPER.md §7 expanded with five concrete technical gap analyses: cross-passage APY detection (§7.6), keyword context disambiguation (§7.7), value co-occurrence and tension modeling (§7.8), observation consistency scoring (§7.9), SRL claim-level validation integration (§7.10). Pipeline and docs reviewed against AiMe SCAL/SRL implementations for robustness parity.
 **Version:** Living document — update whenever a phase completes or design changes.
 
 ---
@@ -197,6 +197,87 @@ agreement_confidence = 1.0 − |keyword_signal − embedding_signal|
 | Corpus statistics | ⏳ | Value distribution, resistance distribution, vocabulary coverage |
 | Dataset card generation | ⏳ | HuggingFace-compatible metadata |
 | `datasets` library export | ⏳ | Compatible format for `load_dataset()` |
+
+---
+
+## Phase 8a — Cross-Passage APY Detection ⏳
+
+**Goal:** Detect APY events that span multiple passages — pressure in one passage, failure in a later one. Currently these are classified P0 + AMBIGUOUS; the most informative APY label is silently lost.
+
+**Why this matters:**
+- Historical APY is structurally cross-passage. Pressure and response rarely co-occur in 450 characters.
+- Lincoln documents political pressure in a journal entry; the corresponding reversal is in a speech weeks later. The current pipeline sees two unrelated events.
+- Deferred APY (held initially, failed later) is a distinct behavioral signal from immediate yield.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `apy_context` table in `values.db` | ⏳ | `(session_id, record_id, ts, markers)` — rolling buffer per figure |
+| Context window lookup in `classify_observation()` | ⏳ | Check context buffer before failure-marker branch |
+| `pressure_source_id` field in export JSONL | ⏳ | Links failure record back to its pressure source passage |
+| `deferred_apy_lag` field | ⏳ | Passage count or time between pressure and failure |
+| Context window config | ⏳ | N=5 undated / 72h dated — configurable in `core/config.py` |
+
+---
+
+## Phase 8b — Keyword Context Disambiguation ⏳
+
+**Goal:** Add a second-pass disambiguation filter to reduce false positives from context-free keyword matching. Words like `afraid`, `fair`, `patient`, `love`, `promise` fire on correct keywords in wrong semantic contexts.
+
+**Why this matters:**
+- "I was afraid of being late" fires `courage`. Zero courage content.
+- "My patient recovered" fires `patience`. Word used as noun.
+- "This promises to be interesting" fires `commitment`. No commitment expressed.
+- These inflate P1 counts and lower average resistance scores across the corpus.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Grammatical role filter | ⏳ | Regex disqualifying patterns per value (nominal/idiomatic uses) |
+| First-person grounding check | ⏳ | Agent presence within token window of keyword |
+| Action-evidence list per value | ⏳ | Short action word list per value — presence boosts, absence flags |
+| `disambiguation_confidence` field | ⏳ | Added to `value_observations` + export JSONL [0.0, 1.0] |
+| `--min-disambiguation` export flag | ⏳ | Filter low-confidence observations without re-ingesting |
+
+---
+
+## Phase 8c — Value Co-occurrence and Interaction Modeling ⏳
+
+**Goal:** Model relationships between values — co-occurrence patterns, value tension events (where one value was held by sacrificing another). Values are not independent dimensions; their interactions are behavioral signal.
+
+**Why this matters:**
+- Courage + integrity co-occur in resistance-to-authority passages — coupled examples are higher-information training records.
+- Independence vs. loyalty, fairness vs. compassion — documented tension events reveal value hierarchy, not just value presence.
+- Value tension events (one value held, one failed) are the highest-value training records in the corpus.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Co-occurrence matrix at export | ⏳ | Per-pair (P1+P1 / P1+P0 / P0+P0) counts per figure and cross-figure |
+| `value_tension` table in `values.db` | ⏳ | `(session_id, record_id, ts, value_held, value_failed, resistance, text_excerpt)` |
+| Tension pair list config | ⏳ | 5 default pairs in `core/config.py` (independence/loyalty, fairness/compassion, etc.) |
+| `--value-tension` export flag | ⏳ | Outputs `ric_value_tensions.jsonl` with highest training weights |
+| Co-occurrence report in `ric_historical_report.json` | ⏳ | 105-pair interaction matrix |
+
+---
+
+## Phase 8d — Observation Consistency Scoring ⏳
+
+**Goal:** Add a consistency score to the value registry that captures the *distribution* of resistance evidence across observations, not just the cumulative weight. 3 observations in one speech ≠ 45 observations across 30 years.
+
+**Formula:**
+```
+consistency = min(1.0,
+    0.30 × min(1.0, n / 10)              ← observation volume (saturates at 10)
+  + 0.30 × (1.0 − σ_r / 0.40)           ← resistance stability (low variance = high consistency)
+  + 0.25 × min(1.0, span_s / 31536000)  ← temporal spread (saturates at 1 year)
+  + 0.15 × min(1.0, doc_types / 3)      ← source diversity (saturates at 3 types)
+)
+```
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `consistency` column in `value_registry` | ⏳ | Computed at `upsert_registry()` call time |
+| `observation_consistency` field in export JSONL | ⏳ | Propagated from registry |
+| `--min-consistency` export flag | ⏳ | Excludes low-consistency observations from training set |
+| Divergence detection | ⏳ | Flags figures with high weight but low consistency (persona/behavior divergence signal) |
 
 ---
 
