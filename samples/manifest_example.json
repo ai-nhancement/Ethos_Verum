@@ -1,0 +1,54 @@
+{
+  "corpus_name": "historical_figures_v1",
+  "description": "Multi-source corpus of historical figures for value extraction",
+  "default_significance": 0.90,
+  "figures": [
+    {
+      "name": "gandhi",
+      "sources": [
+        {
+          "file": "samples/gandhi_autobiography.txt",
+          "doc_type": "journal",
+          "pub_year": 1927,
+          "significance": 0.95
+        },
+        {
+          "file": "samples/gandhi_speeches.txt",
+          "doc_type": "speech",
+          "pub_year": 1930
+        },
+        {
+          "file": "samples/gandhi_letters.txt",
+          "doc_type": "letter"
+        }
+      ]
+    },
+    {
+      "name": "lincoln",
+      "sources": [
+        {
+          "file": "samples/lincoln_speeches.txt",
+          "doc_type": "speech",
+          "pub_year": 1863
+        },
+        {
+          "file": "samples/lincoln_letters.txt",
+          "doc_type": "letter",
+          "pub_year": 1864
+        }
+      ]
+    },
+    {
+      "name": "seneca",
+      "sources": [
+        {
+          "file": "samples/seneca_letters.txt",
+          "doc_type": "letter",
+          "pub_year": 65,
+          "translation": true,
+          "significance": 0.85
+        }
+      ]
+    }
+  ]
+}

@@ -123,9 +123,14 @@ class Config:
     min_significance_threshold: float = 0.10
     min_resistance_threshold:   float = 0.20
     enabled:                    bool  = True
+    apy_context_window_n:       int   = 5
 ```
 
 `get_config()` returns a module-level singleton. Override at startup by modifying the singleton directly.
+
+`core/config.py` also defines:
+- `VALUE_TENSION_PAIRS` — list of 5 `(value_a, value_b)` tuples; default pairs derived from Schwartz (1992) / Rokeach (1973)
+- `is_tension_pair(v1, v2) → bool` — symmetric lookup against `_TENSION_PAIR_SET`
 
 ---
 
@@ -174,22 +179,29 @@ SQLite singleton at `data/values.db`. Stores value observations, registry, water
 
 | Table | Purpose |
 |-------|---------|
-| `value_observations` | Append-only. One row per matched value signal per passage. |
+| `value_observations` | Append-only. One row per matched value signal per passage. Includes `disambiguation_confidence` field. |
 | `value_registry` | UPSERT. PK `(session_id, value_name)`. Running averages of demonstrations, significance, resistance, consistency, weight. `session_id=''` is the cross-figure aggregate. |
 | `value_watermarks` | Per-session `last_processed_ts`. |
 | `figure_sources` | Figure metadata: name, doc_type, passage_count, ingested_at. |
+| `value_tension` | Value tension events: `(id, session_id, record_id, ts, value_held, value_failed, resistance, text_excerpt, created_at)`. Written by `_detect_tensions()` in `cli/export.py`. |
+| `apy_context` | Rolling APY pressure buffer: `(id, session_id, record_id, ts, passage_idx, markers_json, window_n, created_at)`. Used by cross-passage APY detection. Pruned to N most recent per session. |
 
 **Key methods:**
 
 | Method | Purpose |
 |--------|---------|
 | `record_observation(...)` | Append a value signal observation |
-| `upsert_registry(session_id, value_name, significance, resistance, ts)` | Update running weight |
+| `upsert_registry(session_id, value_name, significance, resistance, ts)` | Update running weight + recompute consistency |
 | `get_registry(session_id, min_demonstrations)` | Sorted-by-weight value profile |
 | `get_universal_registry(min_demonstrations)` | Cross-figure aggregate |
 | `register_figure_source(session_id, figure_name, document_type, passage_count)` | Figure metadata |
 | `get_figures_list()` | All figures with registry stats joined |
 | `get_stats()` | Summary: total observations, top values, figure count |
+| `record_tension(session_id, record_id, ts, value_held, value_failed, resistance, text_excerpt)` | Write a tension event |
+| `get_tensions(session_id)` | All tension events for a figure |
+| `write_apy_context(session_id, record_id, ts, passage_idx, markers, window_n)` | Write pressure markers to rolling buffer |
+| `get_apy_context(session_id, window_n)` | Read N most recent pressure entries for context lookup |
+| `prune_apy_context(session_id, window_n)` | Delete entries beyond window |
 
 ---
 
@@ -248,7 +260,7 @@ from core.value_extractor import VALUE_VOCAB
 | `loyalty` | "stand by", "loyal", "won't leave", "through thick and thin" |
 | `humility` | "I was wrong", "my mistake", "I learned", "I need to admit" |
 
-**Phase 2** replaces keyword matching with embedding-based clustering in a vector store. Phase 1 keyword extraction runs first to validate the pipeline and collect baseline data before the switch.
+**Phase 1** adds semantic embedding (BGE-large + Qdrant) alongside keyword detection — passages where the value is present but no keyword fires are caught by the embedding layer.
 
 ---
 
@@ -380,14 +392,17 @@ python -m cli.ingest --figure aurelius --file letters_fronto.txt --doc-type lett
 
 ```
 python -m cli.export \
-    [--figure <name>]           Export only this figure
-    [--p1-threshold <float>]    Min resistance for P1 (default 0.55)
-    [--p0-threshold <float>]    Max resistance for P0 (default 0.35)
-    [--min-observations <int>]  Min observations per value per figure (default 1)
-    [--output-dir <path>]       Output directory (default output/ric/)
-    [--dry-run]                 Print stats only — no files written
-    [--no-ambiguous]            Exclude AMBIGUOUS from per-figure files
-    [--db <path>]               Path to values.db (default data/values.db)
+    [--figure <name>]              Export only this figure
+    [--p1-threshold <float>]       Min resistance for P1 (default 0.55)
+    [--p0-threshold <float>]       Max resistance for P0 (default 0.35)
+    [--min-observations <int>]     Min observations per value per figure (default 1)
+    [--output-dir <path>]          Output directory (default output/ric/)
+    [--dry-run]                    Print stats only — no files written
+    [--no-ambiguous]               Exclude AMBIGUOUS from per-figure files
+    [--db <path>]                  Path to values.db (default data/values.db)
+    [--value-tension]              Also write ric_value_tensions.jsonl (1.5× training weight)
+    [--min-disambiguation <float>] Exclude observations below this disambiguation_confidence
+    [--min-consistency <float>]    Exclude observations below this observation_consistency
 ```
 
 **Output files:**
@@ -410,24 +425,32 @@ Where:
 - `demonstrations` — number of passages where this value was detected for this figure
 - `avg_significance` — running mean of passage significance scores
 - `avg_resistance` — running mean of resistance scores for this value in this figure
-- `consistency` — `1 − (std_dev / mean)` of resistance scores, clamped `[0.0, 1.0]`
-  - Returns `0.5` when fewer than 2 samples (undefined with single observation)
+- `consistency` — 4-component score: volume + resistance stability + temporal spread + source diversity (see below)
+  - Returns `0.5` when fewer than 2 observations (undefined with single observation)
 
 **What weight captures:** *how often* × *how much each instance mattered* × *how costly it was* × *how stable the pattern is*.
 
 A figure who demonstrates `integrity` once under extreme pressure scores differently from one who demonstrates it a hundred times in comfort. Weight encodes both quantity and quality.
 
-### Consistency
+### Consistency (Phase 8d — 4-component formula)
 
-```python
-values = [all resistance scores for (session_id, value_name)] + [new_resistance]
-mean = sum(values) / len(values)
-variance = sum((v - mean) ** 2 for v in values) / len(values)
-std_dev = sqrt(variance)
-consistency = max(0.0, min(1.0, 1.0 - (std_dev / mean)))
+```
+n         = observation count for (session_id, value_name)
+σ_r       = stddev(resistance_scores)
+span_s    = max(ts) − min(ts)          ← temporal span in seconds
+doc_types = count(distinct doc_types for this (session_id, value_name))
+
+consistency = min(1.0,
+    0.30 × min(1.0, n / 10)             ← volume (saturates at 10 observations)
+  + 0.30 × (1.0 − σ_r / 0.40)          ← resistance stability (low variance = high score)
+  + 0.25 × min(1.0, span_s / 31536000) ← temporal spread (saturates at 1 year)
+  + 0.15 × min(1.0, doc_types / 3)     ← source diversity (saturates at 3 doc types)
+)
 ```
 
-Consistency rewards figures who demonstrate a value *stably* across diverse contexts — not just the single highest-resistance moment.
+Returns `0.5` when fewer than 2 observations (undefined — single observation, no spread).
+
+Consistency rewards figures who demonstrate a value *stably* across time, across source types, and across contexts — not just the single highest-resistance moment. Figures with high weight but low consistency are flagged as potential persona/behavior divergence candidates.
 
 ### Resistance Formula (summary)
 
@@ -489,13 +512,13 @@ A figure can be ingested from multiple source files, multiple document types, ac
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `core/config.py` | Config dataclass | `get_config()`, `Config` |
+| `core/config.py` | Config dataclass + tension pairs | `get_config()`, `Config`, `VALUE_TENSION_PAIRS`, `is_tension_pair(v1, v2)` |
 | `core/document_store.py` | Passage storage | `get_document_store()`, `DocumentStore` |
 | `core/value_store.py` | Value persistence | `get_value_store()`, `ValueStore` |
 | `core/resistance.py` | Resistance scoring | `compute_resistance(text, significance, doc_type)` |
-| `core/value_extractor.py` | Extraction loop | `process_figure(session_id)`, `extract_value_signals(...)`, `VALUE_VOCAB` |
+| `core/value_extractor.py` | Extraction loop | `process_figure(session_id)`, `extract_value_signals(...)`, `VALUE_VOCAB`, `_DISQUALIFIERS` |
 | `cli/ingest.py` | Ingestion CLI | `ingest(...)`, `segment_text(...)` |
-| `cli/export.py` | Export CLI | `export(...)`, `classify_observation(...)`, `build_training_records(...)` |
+| `cli/export.py` | Export CLI | `export(...)`, `classify_observation(...)`, `build_training_records(...)`, `_compute_cooccurrence(...)`, `_detect_tensions(...)` |
 
 ---
 
@@ -535,7 +558,7 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 | Deterministic output | Same input + same thresholds = identical output. No randomness. |
 | Append-only observations | `value_observations` is never updated or deleted. Only appended. |
 | Watermark continuity | Processing never repeats. Watermarks advance monotonically. |
-| Fail-open | `process_figure()` never raises. Silent failures logged at the call site. |
+| Fail-open | `process_figure()` never raises. All write failures log at WARNING; read failures at DEBUG — both with `exc_info=True`. |
 | No pre-labeling | No figure is labeled positive or negative at ingestion. Classification emerges from the data. |
 | Doc-type transparency | Document type is recorded at ingestion and flows through to every output field. Authenticity weighting is explicit, not implicit. |
 
@@ -543,7 +566,7 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 
 ## 14. Roadmap
 
-### Phase 0 — Foundation (complete, 2026-03-04)
+### Phase 0 — Foundation ✅ (2026-03-04)
 - [x] `core/document_store.py` — standalone passage storage
 - [x] `core/value_store.py` — value observations + registry + figure_sources
 - [x] `core/config.py` — threshold config
@@ -552,57 +575,56 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 - [x] `cli/ingest.py` — full ingestion pipeline with dry-run
 - [x] `cli/export.py` — P1/P0/APY classification + JSONL export
 
-### Phase 1 — Multilingual Ingestion
-- [ ] Multilingual embedding model: LaBSE or mE5-large (109 languages)
-- [ ] `--lang` flag in `cli/ingest.py` — native-language ingestion path
-- [ ] `VALUE_VOCAB` extended with pre-20th-century English synonyms (`fortitude`, `verity`, `magnanimity`, etc.)
-- [ ] Parallel keyword lists for Greek / Latin / Arabic / Chinese / French / German
-- [ ] Dual-language agreement scoring when both original + translation are available
+### Quality Extensions (QX-A through QX-D) ✅ (2026-03-05)
+- [x] **QX-A Keyword Disambiguation** — `_DISQUALIFIERS` per-value regex + `_FIRST_PERSON_RE` proximity check + `disambiguation_confidence` field
+- [x] **QX-B Co-occurrence + Tension** — `VALUE_TENSION_PAIRS`, `value_tension` table, `ric_value_tensions.jsonl` export
+- [x] **QX-C Cross-Passage APY** — `apy_context` table, `pressure_source_id` + `deferred_apy_lag` fields
+- [x] **QX-D Consistency Scoring** — 4-component `_compute_consistency()`: volume + resistance stability + temporal spread + source diversity
+- [x] Production hardening: structured logging, figure name guard, 50 MB file limit, thread-safe DB connections
 
-### Phase 2 — Hybrid Detection + Agreement Confidence
-- [ ] Passage embedding store — 15 value cluster centroids from `VALUE_VOCAB` seed passages
-- [ ] FAISS or Qdrant ANN search — nearest value cluster per passage
-- [ ] `hybrid_score = α × keyword_signal + (1−α) × embedding_signal` (default α=0.5)
-- [ ] `agreement_confidence = 1.0 − |keyword_signal − embedding_signal|` — exported as field
-- [ ] α configurable in `core/config.py`
-- [ ] Phase 0 keyword observations remain valid; backward compatible
+### Phase 1 — Semantic Extraction ✅ (2026-03-16)
+- [x] `core/embedder.py` — `BAAI/bge-large-en-v1.5` (1024d) singleton, lazy-load, fail-open
+- [x] `core/value_seeds.py` — 322 seed sentences across 15 values (modern + archaic register)
+- [x] `core/semantic_store.py` — Qdrant collection `ethos_value_prototypes`, `build_prototypes()` + `query_points()`
+- [x] `cli/build_prototypes.py` — embed seeds and load all 15 prototypes
+- [x] Hybrid scoring: agreement → `keyword+semantic` source tag + confidence boost; semantic-only → new signal with source `semantic`
 
-### Phase 3 — Temporal Value Arcs
-- [ ] `--era 1960s` flag in `cli/ingest.py` → `session_id = figure:mlk:1960s`
-- [ ] `value_trajectory()` query in `core/value_store.py` → ordered `(era, value_name, weight)` tuples
-- [ ] `--peak-era` flag — boosts significance weighting for peak-influence era
-- [ ] `cli/export.py --by-era` — separate JSONL per era per figure
-- [ ] `temporal_consistency` column in registry — stability metric across eras
+### Phase 2 — Structural / Independent Classifiers ✅ (2026-03-16, hardened 2026-03-16)
+- [x] `core/structural_layer.py` — pure regex adversity/agency/resistance/stakes patterns; `structural_score` in [0.0, 1.0]
+- [x] Zero-shot DeBERTa (`MoritzLaurer/deberta-v3-large-zeroshot-v2.0`) — 15 per-value hypotheses, two-threshold detection
+- [x] `core/lexicon_layer.py` (Layer 1b) — MFD2.0 (2,041 entries) + MoralStrength (452 entries); thread-safe double-checked locking
+- [x] `core/mft_classifier.py` (Layer 3c) — `MMADS/MoralFoundationsClassifier` (RoBERTa, 10 MFT labels); tokenizer-level truncation
+- [x] Phase 2 hardening: 7 defects fixed (duplicate regex, dead code, thread safety, truncation, resistance loop, schema consistency, multi_label contradiction)
+- [x] 553 tests passing
 
-### Phase 4 — Corpus Balance Tool
-- [ ] `cli/balance.py` — analyze corpus composition by P1-rate distribution
-- [ ] Corpus report: figure type breakdown, P1/P0/APY ratios, coverage gaps
-- [ ] Inverse-frequency export weighting — over-represented values down-weighted
-- [ ] `corpus.target_spectrum_ratio` in `core/config.py` (default: 1 positive : 4 middle-ground)
-- [ ] Recommendation output: suggests which figure types are underrepresented
+### Phase 3 — Translation and Temporal Handling ✅ (2026-03-16)
+- [x] `langdetect` language detection at ingest (seeded for determinism)
+- [x] `source_authenticity` multiplier: original=1.0 / known translation=0.85 / uncertain=0.70
+- [x] `preprocess_archaic()` — 26 deterministic replacement rules (thou/thee/thy/hath/etc.)
+- [x] `pub_year` 6-tier temporal discount: pre-1400=0.70 through 1850+=1.0
+- [x] `--translation` and `--pub-year` CLI flags; `source_lang`, `source_authenticity`, `pub_year` columns in `documents.db`
 
-### Phase 5 — API Layer
-- [ ] FastAPI service wrapping the pipeline
-- [ ] `POST /figures/{name}/ingest` — accepts text payload directly
-- [ ] `GET /figures/{name}/profile` — value registry as JSON, with temporal arc if available
-- [ ] `GET /figures/universal` — cross-figure aggregate
-- [ ] `GET /export/ric` — trigger export, return report
+### Phase 4 — REST API ✅ (2026-03-16)
+- [x] `core/pipeline.py` — `ingest_text()`, `figure_profile()`, `universal_profile()` (shared by CLI + API)
+- [x] `api/models.py` — Pydantic request/response models
+- [x] `api/app.py` — FastAPI, 5 endpoints + health
+- [x] `api/server.py` — Uvicorn dev entrypoint
+- [x] Endpoints: `POST /figures/{name}/ingest`, `GET /figures`, `GET /figures/universal`, `GET /figures/{name}/profile`, `POST /export/ric`, `GET /health`
 
-### Phase 6 — Web Dashboard
-- [ ] Figure browser — profile cards, value radar charts, temporal arc view
-- [ ] Corpus upload UI — drag-and-drop + doc_type + era selectors
+### Phase 5 — Web Dashboard ⏳
+- [ ] Figure browser — profile cards, value radar charts
+- [ ] Corpus upload UI
 - [ ] Universal registry visualization — cross-figure value heatmap
-- [ ] Training set builder — filter by figure / value / doc_type / label / era
-- [ ] Observation inspector — raw passage with resistance, hybrid score, agreement confidence
+- [ ] Training set builder — filter by figure / value / doc_type / label
 
-### Phase 7 — Corpus Scale + HuggingFace
-- [ ] Batch ingestion CLI for processing a directory of files
-- [ ] Multi-file figure support (multiple doc_types per figure, additive)
-- [ ] Corpus statistics: vocabulary coverage, value distribution, resistance distribution
-- [ ] Dataset card generation (HuggingFace-compatible metadata)
-- [ ] `datasets` library export — `load_dataset()` compatible
+### Phase 6 — Corpus Scale ✅ (2026-03-16)
+- [x] `core/corpus.py` — corpus-level stats: overview, figure summaries, value/resistance distributions, cross-figure table
+- [x] `cli/batch_ingest.py` — manifest-driven batch ingestion, multi-file per figure, per-file error recovery
+- [x] `cli/corpus_stats.py` — human-readable + JSON corpus report
+- [x] `cli/dataset_card.py` — HuggingFace-compatible dataset card auto-generation
+- [x] `core/value_store.py` multi-file fix: `passage_count` accumulates across ingests; mixed `doc_type` auto-detected
 
-### Phase 8 — SRL Integration (optional)
+### Phase 7 — SRL Integration 💡
 - [ ] Port `modules/srl/` from AiMe: claim_extractor, ric_gate, trait_compiler
-- [ ] AI integrity layer: applies RIC gate to model outputs during evaluation
 - [ ] Behavioral trait profiles derived from extracted value registry
+- [ ] AI integrity layer: applies RIC gate to model outputs during evaluation

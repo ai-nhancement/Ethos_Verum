@@ -7,6 +7,7 @@ Ethos — ingest a historical figure text corpus into the value extraction pipel
 Usage:
     python -m cli.ingest --figure gandhi --file samples/gandhi.txt --doc-type journal
     python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type speech --pub-year 1863
+    python -m cli.ingest --figure seneca --file samples/seneca.txt --doc-type letter --pub-year 65 --translation
     python -m cli.ingest --figure nixon --file samples/nixon.txt --doc-type speech --dry-run
 
 Document types:
@@ -30,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import logging
 import re
 import sys
 import time
@@ -41,12 +43,17 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from core.document_store import get_document_store
+from core.pipeline import ingest_text as _ingest_text
 from core.value_extractor import process_figure
 from core.value_store import get_value_store
 
+_log = logging.getLogger(__name__)
+
 _MAX_PASSAGE_CHARS = 450
 _DEFAULT_SIGNIFICANCE = 0.90
+_MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+_FIGURE_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$')
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +96,7 @@ def ingest(
     document_type: str,
     pub_year: int | None = None,
     significance: float = _DEFAULT_SIGNIFICANCE,
+    is_translation: bool | None = None,
     dry_run: bool = False,
     extract: bool = True,
 ) -> int:
@@ -96,34 +104,27 @@ def ingest(
     Ingest passages from source_file for figure_name.
     Returns number of passages processed (0 on error).
     """
+    if not _FIGURE_NAME_RE.match(figure_name):
+        _log.error("Invalid figure name %r — must be alphanumeric/underscore/hyphen, 1-64 chars", figure_name)
+        return 0
+
     path = Path(source_file)
     if not path.exists():
-        print(f"[ingest] ERROR: file not found: {source_file}")
+        _log.error("File not found: %s", source_file)
+        return 0
+
+    file_size = path.stat().st_size
+    if file_size > _MAX_FILE_BYTES:
+        _log.error("File too large: %d bytes (limit %d)", file_size, _MAX_FILE_BYTES)
         return 0
 
     text = path.read_text(encoding="utf-8")
-    passages = segment_text(text)
 
-    if not passages:
-        print(f"[ingest] No passages extracted from {source_file}")
-        return 0
-
-    session_id = f"figure:{figure_name.lower().strip()}"
-
-    if pub_year:
-        base_ts = float(calendar.timegm((pub_year, 1, 1, 0, 0, 0, 0, 0, 0)))
-    else:
-        base_ts = time.time() - (365 * 24 * 3600)
-
-    print(f"[ingest] figure      = {figure_name!r}")
-    print(f"[ingest] session_id  = {session_id!r}")
-    print(f"[ingest] doc_type    = {document_type!r}")
-    print(f"[ingest] source      = {source_file}")
-    print(f"[ingest] passages    = {len(passages)}")
-    print(f"[ingest] significance= {significance}")
-
+    # Dry-run: preview segmentation without writing
     if dry_run:
-        print(f"[ingest] DRY RUN — no writes")
+        passages = segment_text(text)
+        _log.info("DRY RUN — figure=%r doc_type=%r passages=%d",
+                  figure_name, document_type, len(passages))
         print()
         for i, p in enumerate(passages[:8]):
             print(f"  [{i:02d}] {p[:100]}{'...' if len(p) > 100 else ''}")
@@ -131,42 +132,28 @@ def ingest(
             print(f"  ... and {len(passages) - 8} more passages")
         return len(passages)
 
-    doc_store = get_document_store()
-    val_store = get_value_store()
-
-    # Register figure metadata in values.db
-    val_store.register_figure_source(
-        session_id=session_id,
+    result = _ingest_text(
         figure_name=figure_name,
-        document_type=document_type,
-        passage_count=len(passages),
+        text=text,
+        doc_type=document_type,
+        pub_year=pub_year,
+        is_translation=is_translation,
+        significance=significance,
+        run_extract=extract,
     )
 
-    # Reset watermark — sentinel predates all of human history so
-    # value_extractor picks up every passage regardless of pub_year.
-    doc_store.set_watermark(session_id, -1_000_000_000_000.0)
+    if not result.ok:
+        _log.error("Ingest failed: %s", result.error)
+        return 0
 
-    # Insert passages into documents.db
-    inserted = 0
-    for i, passage in enumerate(passages):
-        ts = base_ts + i  # 1-second apart to preserve ordering
-        doc_store.insert_passage(
-            figure_name=figure_name,
-            session_id=session_id,
-            text=passage,
-            doc_type=document_type,
-            significance=significance,
-            ts=ts,
-        )
-        inserted += 1
+    _log.info("figure=%r lang=%r authenticity=%.2f passages=%d observations=%d",
+              figure_name, result.source_lang, result.source_authenticity,
+              result.passages_ingested, result.observations_recorded)
 
-    print(f"[ingest] inserted {inserted} passages into documents.db")
+    if extract and result.passages_ingested > 0:
+        _run_and_print(result.session_id)
 
-    if extract and inserted > 0:
-        print(f"[ingest] running value extraction for {session_id!r} ...")
-        _run_and_print(session_id)
-
-    return inserted
+    return result.passages_ingested
 
 
 def _run_and_print(session_id: str) -> None:
@@ -211,7 +198,9 @@ def main() -> int:
         help="Document type — affects resistance bonus weighting",
     )
     parser.add_argument("--pub-year", type=int, default=None,
-                        help="Publication/composition year (for timestamp ordering)")
+                        help="Publication/composition year (for timestamp ordering + temporal discount)")
+    parser.add_argument("--translation", action="store_true", default=False,
+                        help="Declare this document is a translation (sets source_authenticity=0.85)")
     parser.add_argument("--significance", type=float, default=_DEFAULT_SIGNIFICANCE,
                         help=f"Significance score for all passages (default {_DEFAULT_SIGNIFICANCE})")
     parser.add_argument("--dry-run", action="store_true",
@@ -226,6 +215,7 @@ def main() -> int:
         document_type=args.doc_type,
         pub_year=args.pub_year,
         significance=args.significance,
+        is_translation=True if args.translation else None,
         dry_run=args.dry_run,
         extract=not args.no_extract,
     )

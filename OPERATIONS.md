@@ -163,9 +163,11 @@ Not sure?
 python -m cli.ingest [flags]
 
 Required:
-  --figure NAME      Figure identifier. Lowercase, no spaces. e.g. gandhi, jfk, malcolm_x
+  --figure NAME      Figure identifier. 1–64 chars. Alphanumeric, underscore, hyphen only.
+                     e.g. gandhi, jfk, malcolm_x, marcus-aurelius
                      Becomes the session_id: figure:<name>
-  --file PATH        Path to source text file (UTF-8)
+                     Invalid names are rejected before any DB write.
+  --file PATH        Path to source text file (UTF-8). Maximum 50 MB.
   --doc-type TYPE    journal | letter | speech | action | unknown
 
 Optional:
@@ -179,7 +181,8 @@ Optional:
                      Lower this (e.g. 0.5) for less authoritative sources.
 
   --dry-run          Preview segmentation only. No database writes. Prints the first
-                     8 passages and total count.
+                     8 passages and total count. Segmentation info is emitted via
+                     logging — configure logging to see figure/session/doc_type headers.
 
   --no-extract       Insert passages but skip immediate value extraction.
                      Extraction still runs on the next ingest or manual call.
@@ -201,19 +204,13 @@ The segmenter splits text into sentence-bounded passages of up to ~450 character
 ```bash
 python -m cli.ingest --figure lincoln --file samples/lincoln.txt --doc-type speech --dry-run
 
-[ingest] figure      = 'lincoln'
-[ingest] session_id  = 'figure:lincoln'
-[ingest] doc_type    = 'speech'
-[ingest] source      = samples/lincoln.txt
-[ingest] passages    = 47
-[ingest] significance= 0.9
-[ingest] DRY RUN — no writes
-
   [00] Four score and seven years ago our fathers brought forth on this continent...
   [01] Now we are engaged in a great civil war, testing whether that nation, or any...
   [02] We are met on a great battle-field of that war. We have come to dedicate...
   ...and 44 more passages
 ```
+
+Figure/session/doc_type summary lines are emitted via `logging.INFO` — visible when logging is configured (e.g. `python -m cli.ingest ... --dry-run 2>&1` or set `LOG_LEVEL=INFO`).
 
 ### What Happens During a Run
 
@@ -334,6 +331,18 @@ Optional:
   --no-ambiguous       Exclude AMBIGUOUS observations from per-figure files.
                        Still included in the aggregate files by default.
   --db PATH            Path to values.db. Default: data/values.db
+
+  --value-tension      Also write ric_value_tensions.jsonl — tension events where
+                       one value was held and a paired value failed in the same
+                       passage. These records carry 1.5× training weight.
+
+  --min-disambiguation Float 0.0–1.0. Exclude observations below this disambiguation
+                       confidence score. Useful for filtering likely false-positive
+                       keyword matches without re-ingesting. Default: 0.0 (include all).
+
+  --min-consistency    Float 0.0–1.0. Exclude observations whose value-registry entry
+                       has consistency below this threshold. Useful for high-quality
+                       filtered exports. Default: 0.0 (include all).
 ```
 
 ### Classification Logic
@@ -442,6 +451,11 @@ Each line in the `.jsonl` files is a JSON object. Here is a complete positive (P
 | `pressure_markers` | list[str] | APY pressure phrases found in `text_excerpt` |
 | `failure_markers` | list[str] | Failure phrases found in `text_excerpt` |
 | `hold_markers` | list[str] | Hold phrases found in `text_excerpt` |
+| `disambiguation_confidence` | float | 0.0–1.0. Confidence that keyword match is a genuine value demonstration (not incidental/idiomatic use). 1.0 = all three disambiguation checks passed. 0.0 = grammatical role disqualifier fired. |
+| `observation_consistency` | float | 0.0–1.0. 4-component consistency score from the value registry: volume + resistance stability + temporal spread + source diversity. |
+| `pressure_source_id` | string | UUID of the source passage containing the APY pressure markers. Present on cross-passage APY records only (when `label="APY"` and pressure came from a different passage). Empty string otherwise. |
+| `deferred_apy_lag_s` | float | Seconds between the pressure passage and this failure passage. Present on cross-passage APY records only. |
+| `deferred_apy_lag_n` | int | Passage count between the pressure passage and this failure passage. Present on cross-passage APY records only. |
 
 **`label_reason` values:**
 
@@ -695,6 +709,11 @@ AMBIGUOUS observations (middle resistance, no clear markers) are informative for
 ---
 
 ## 10. Troubleshooting
+
+**"ingest returns 0 / no output"** (check logging for ERROR lines)
+- Figure name contains invalid characters. Only `a-z A-Z 0-9 _ -` are allowed, 1–64 chars. Names with spaces, slashes, or dots are rejected before any DB write. Use `malcolm_x` not `Malcolm X`.
+- File not found: confirm the path is correct and accessible.
+- File exceeds 50 MB: split the source file into multiple smaller files and ingest each separately.
 
 **"No passages extracted from file"**
 - Check the file is valid UTF-8: `python -c "open('file.txt', encoding='utf-8').read()"`

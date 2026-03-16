@@ -19,6 +19,7 @@ Never raises. All write methods fail silently.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import sqlite3
@@ -26,6 +27,8 @@ import threading
 import time
 import uuid
 from typing import Dict, List, Optional
+
+_log = logging.getLogger(__name__)
 
 _DB_PATH = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "data", "values.db")
@@ -178,7 +181,7 @@ class ValueStore:
             )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("record_observation failed", exc_info=True)
         return uid
 
     def get_observations(
@@ -205,6 +208,7 @@ class ValueStore:
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_observations failed", exc_info=True)
             return []
 
     # ------------------------------------------------------------------
@@ -261,7 +265,7 @@ class ValueStore:
                 )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("upsert_registry failed", exc_info=True)
 
     def get_registry(
         self,
@@ -278,6 +282,7 @@ class ValueStore:
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_registry failed", exc_info=True)
             return []
 
     # ------------------------------------------------------------------
@@ -293,6 +298,7 @@ class ValueStore:
             ).fetchone()
             return float(row[0]) if row else 0.0
         except Exception:
+            _log.debug("get_watermark failed", exc_info=True)
             return 0.0
 
     def set_watermark(self, session_id: str, ts: float) -> None:
@@ -306,7 +312,7 @@ class ValueStore:
             )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("set_watermark failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Figure sources
@@ -327,14 +333,18 @@ class ValueStore:
                    VALUES (?,?,?,?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
                        figure_name=excluded.figure_name,
-                       document_type=excluded.document_type,
+                       document_type=CASE
+                           WHEN figure_sources.document_type = excluded.document_type
+                               THEN excluded.document_type
+                           ELSE 'mixed'
+                       END,
                        ingested_at=excluded.ingested_at,
-                       passage_count=excluded.passage_count""",
+                       passage_count=figure_sources.passage_count + excluded.passage_count""",
                 (session_id, figure_name, document_type, time.time(), passage_count),
             )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("register_figure_source failed", exc_info=True)
 
     def get_figure_source(self, session_id: str) -> Dict:
         try:
@@ -344,6 +354,7 @@ class ValueStore:
             ).fetchone()
             return dict(row) if row else {}
         except Exception:
+            _log.debug("get_figure_source failed", exc_info=True)
             return {}
 
     def get_figures_list(self) -> List[Dict]:
@@ -373,6 +384,7 @@ class ValueStore:
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_figures_list failed", exc_info=True)
             return []
 
     def get_universal_registry(self, min_demonstrations: int = 1) -> List[Dict]:
@@ -395,6 +407,7 @@ class ValueStore:
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_universal_registry failed", exc_info=True)
             return []
 
     def get_stats(self) -> Dict:
@@ -420,6 +433,7 @@ class ValueStore:
                 "figure_count": figures,
             }
         except Exception:
+            _log.debug("get_stats failed", exc_info=True)
             return {"total_observations": 0, "top_values": [], "figure_count": 0}
 
     # ------------------------------------------------------------------
@@ -450,7 +464,7 @@ class ValueStore:
             )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("record_tension failed", exc_info=True)
         return uid
 
     def get_tensions(
@@ -470,6 +484,7 @@ class ValueStore:
                 ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_tensions failed", exc_info=True)
             return []
 
     # ------------------------------------------------------------------
@@ -486,14 +501,13 @@ class ValueStore:
         window_n: int = 5,
     ) -> None:
         """Write a pressure context entry and prune to the N most recent."""
-        import uuid as _uuid
         try:
             conn = self._conn()
             conn.execute(
                 """INSERT OR REPLACE INTO apy_context
                    (id, session_id, record_id, ts, passage_idx, markers)
                    VALUES (?,?,?,?,?,?)""",
-                (str(_uuid.uuid4()), session_id, record_id, float(ts),
+                (str(uuid.uuid4()), session_id, record_id, float(ts),
                  int(passage_idx), str(markers)),
             )
             # Prune: keep only the N most recent by passage_idx
@@ -510,7 +524,7 @@ class ValueStore:
             )
             conn.commit()
         except Exception:
-            pass
+            _log.warning("write_apy_context failed", exc_info=True)
 
     def get_apy_context(
         self,
@@ -543,6 +557,7 @@ class ValueStore:
             ).fetchall()
             return [dict(r) for r in rows]
         except Exception:
+            _log.debug("get_apy_context failed", exc_info=True)
             return []
 
     def prune_apy_context(self, session_id: str, keep_n: int = 5) -> None:
@@ -562,7 +577,7 @@ class ValueStore:
             )
             conn.commit()
         except Exception:
-            pass
+            _log.debug("prune_apy_context failed", exc_info=True)
 
 
 # ------------------------------------------------------------------
@@ -629,6 +644,7 @@ def _compute_consistency(
         )
         return round(max(0.0, consistency), 4)
     except Exception:
+        _log.debug("_compute_consistency failed", exc_info=True)
         return 0.5
 
 

@@ -1,3 +1,14 @@
 # Ethos — Value Extraction Pipeline
-# Core pipeline: stdlib only, no ML deps in v1
+# Core pipeline: stdlib only, no ML deps in Phase 0
 # Python 3.10+
+#
+# Phase 0–8d: standard library only (sqlite3, uuid, hashlib, re, json, logging,
+#             threading, calendar, time, pathlib, collections, math, statistics)
+#
+# Production deployment (FastAPI server wrapping the pipeline):
+#   fastapi>=0.110.0
+#   uvicorn[standard]>=0.27.0
+#
+# Phase 1 (multilingual ingestion, when implemented):
+#   sentence-transformers>=2.6.0  # LaBSE / mE5-large
+#   faiss-cpu>=1.7.4              # ANN search for Phase 2

@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -49,6 +50,8 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+_log = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -154,8 +157,7 @@ def _read_figure_observations(
     figure_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     if not Path(db_path).exists():
-        print(f"[export] ERROR: values.db not found at {db_path}")
-        print("[export]  Run: python -m cli.ingest --figure <name> --file <path> --doc-type <type>")
+        _log.error("values.db not found at %s", db_path)
         return []
 
     conn = sqlite3.connect(db_path, timeout=10.0)
@@ -522,19 +524,15 @@ def export(
     min_consistency: float = 0.0,
     value_tension: bool = False,
 ) -> int:
-    print(f"[export] Reading observations from {db_path}")
+    _log.info("Reading observations from %s", db_path)
     observations = _read_figure_observations(db_path, figure_filter)
 
     if not observations:
-        print("[export] No historical figure observations found.")
-        print("[export]  Run: python -m cli.ingest --figure <name> --file <path> --doc-type <type>")
+        _log.warning("No historical figure observations found in %s", db_path)
         return 0
 
-    print(f"[export] Found {len(observations)} raw observations")
-    print(f"[export] P1 threshold:    resistance >= {p1_threshold}")
-    if min_consistency > 0.0:
-        print(f"[export] Min consistency: {min_consistency}")
-    print(f"[export] P0 threshold: resistance <  {p0_threshold}")
+    _log.info("Found %d raw observations (P1>=%.2f P0<%.2f consistency>=%.2f)",
+              len(observations), p1_threshold, p0_threshold, min_consistency)
 
     apy_ctx = _load_apy_context(db_path)
     records = build_training_records(
@@ -547,18 +545,17 @@ def export(
     negative  = [r for r in records if r["label"] in ("P0", "APY")]
     ambiguous = [r for r in records if r["label"] == "AMBIGUOUS"]
 
-    print(f"\n[export] Training set: {len(positive)} positive  {len(negative)} negative  {len(ambiguous)} ambiguous")
+    _log.info("Training set: %d positive  %d negative  %d ambiguous",
+              len(positive), len(negative), len(ambiguous))
 
     if dry_run:
         if not positive and not negative:
-            print("\n[export] NOTE: 0 negative examples found.")
-            print("[export]   Ingest texts from figures with documented failures,")
-            print("[export]   or use --p0-threshold to loosen the threshold.")
-        print("\n[export] DRY RUN — no files written.")
+            _log.warning("0 training examples found — check thresholds or run ingestion first")
+        _log.info("DRY RUN — no files written")
         return 0
 
     if not positive and not negative:
-        print("[export] Nothing to export. Check thresholds or run ingestion first.")
+        _log.warning("Nothing to export — check thresholds or run ingestion first")
         return 0
 
     by_figure: Dict[str, List[Dict]] = defaultdict(list)
@@ -572,15 +569,15 @@ def export(
         n = _write_jsonl(path, fig_records)
         p1n = sum(1 for r in fig_records if r["label"] == "P1")
         p0n = sum(1 for r in fig_records if r["label"] in ("P0", "APY"))
-        print(f"[export] {fig:<22}  {n:>4} records  (P1={p1n}  P0/APY={p0n})  -> {path}")
+        _log.info("%s: %d records (P1=%d P0/APY=%d) -> %s", fig, n, p1n, p0n, path)
 
     pos_path = os.path.join(output_dir, "ric_historical_positive.jsonl")
     n_pos = _write_jsonl(pos_path, positive)
-    print(f"\n[export] Positive  {n_pos:>4} records  -> {pos_path}")
+    _log.info("Positive  %d records -> %s", n_pos, pos_path)
 
     neg_path = os.path.join(output_dir, "ric_historical_negative.jsonl")
     n_neg = _write_jsonl(neg_path, negative)
-    print(f"[export] Negative  {n_neg:>4} records  -> {neg_path}")
+    _log.info("Negative  %d records -> %s", n_neg, neg_path)
 
     by_label: Dict[str, int] = defaultdict(int)
     by_fig_label: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -642,7 +639,7 @@ def export(
     # Co-occurrence matrix (always computed, added to report)
     cooccurrence = _compute_cooccurrence(records)
     report["co_occurrence"] = cooccurrence
-    print(f"[export] Co-occurrence: {len(cooccurrence)} value pairs co-observed")
+    _log.info("Co-occurrence: %d value pairs co-observed", len(cooccurrence))
 
     # Value tension detection (opt-in via --value-tension)
     if value_tension and not dry_run:
@@ -650,21 +647,21 @@ def export(
         if tension_events:
             tension_path = os.path.join(output_dir, "ric_value_tensions.jsonl")
             n_t = _write_jsonl(tension_path, tension_events)
-            print(f"[export] Tensions  {n_t:>4} events   -> {tension_path}")
+            _log.info("Tensions  %d events -> %s", n_t, tension_path)
             report["output_files"]["tensions"] = tension_path
             report["tension_events"] = len(tension_events)
         else:
-            print("[export] Tensions: none detected")
+            _log.info("Tensions: none detected")
 
     report_path = os.path.join(output_dir, "ric_historical_report.json")
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
-    print(f"[export] Report    -> {report_path}")
+    _log.info("Report -> %s", report_path)
 
     total = n_pos + n_neg
-    print(f"\n[export] Done. {total} training examples written to {output_dir}")
-    print(f"[export] Balance:  P1={n_pos}  P0/APY={n_neg}  ratio={n_pos/(n_neg or 1):.2f}:1")
+    _log.info("Done: %d training examples written to %s (P1=%d P0/APY=%d ratio=%.2f:1)",
+              total, output_dir, n_pos, n_neg, n_pos / (n_neg or 1))
     return total
 
 

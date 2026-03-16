@@ -21,10 +21,13 @@ Constitutional invariants:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from core.apy_patterns import APY_PRESSURE_RE as _APY_PRESSURE_RE_INGEST
 from typing import Dict, List
+
+_log = logging.getLogger(__name__)
 
 from core.config import get_config
 from core.document_store import get_document_store
@@ -272,6 +275,144 @@ VALUE_VOCAB: Dict[str, List[str]] = {
 _MIN_KEYWORD_LEN = 3
 _MAX_PASSAGES_PER_RUN = 200
 
+
+# ---------------------------------------------------------------------------
+# Semantic layer helpers
+# ---------------------------------------------------------------------------
+
+def _semantic_signals(
+    text: str,
+    significance: float,
+    cfg,
+) -> List[Dict]:
+    """
+    Run semantic prototype matching against the passage.
+    Returns a list of {value_name, text_excerpt, significance,
+    disambiguation_confidence, source} dicts.
+
+    Confidence = cosine similarity score (already in [0,1] for normalized vecs).
+    Only fires for values above cfg.semantic_threshold.
+    Returns [] if semantic store is unavailable or disabled.
+    """
+    if not cfg.semantic_enabled:
+        return []
+    try:
+        from core.embedder import encode, is_available as emb_ok
+        from core.semantic_store import get_semantic_store
+        if not emb_ok():
+            return []
+        # Archaic preprocessing before embedding (Phase 3)
+        try:
+            from core.temporal_layer import preprocess_archaic
+            embed_text = preprocess_archaic(text)
+        except Exception:
+            embed_text = text
+        vec = encode(embed_text)
+        if vec is None:
+            return []
+        store = get_semantic_store()
+        hits = store.query_passage(
+            vec,
+            top_k=cfg.semantic_top_k,
+            score_threshold=cfg.semantic_threshold,
+        )
+        results = []
+        for value_name, score in hits:
+            excerpt = text[:150] if len(text) <= 150 else text[:147] + "..."
+            results.append({
+                "value_name": value_name,
+                "text_excerpt": excerpt,
+                "significance": significance,
+                "disambiguation_confidence": round(float(score) * cfg.semantic_weight, 4),
+                "source": "semantic",
+            })
+        return results
+    except Exception:
+        return []
+
+# ---------------------------------------------------------------------------
+# Layer 1b helper — lexicon
+# ---------------------------------------------------------------------------
+
+def _lexicon_signals(
+    text: str,
+    significance: float,
+    doc_type: str,
+    cfg,
+) -> List[Dict]:
+    """
+    Run MFD2.0 + MoralStrength lexicon matching on a passage.
+    Returns all signals (virtue and vice) — caller filters by polarity.
+    """
+    if not cfg.lexicon_enabled:
+        return []
+    try:
+        from core.lexicon_layer import lexicon_signals, is_available
+        if not is_available():
+            return []
+        return lexicon_signals(text, significance, doc_type)
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Layer 3 helper
+# ---------------------------------------------------------------------------
+
+def _layer3_signals(
+    text: str,
+    significance: float,
+    doc_type: str,
+    already_detected: List[Dict],
+    cfg,
+) -> tuple:
+    """
+    Run Layer 3 (structural + zero-shot) on a passage.
+
+    Returns (structural_score: float, new_signals: List[Dict], zs_agreement: Dict[str, float]).
+      structural_score — value-agnostic adversity score; caller boosts all signals.
+      new_signals      — zero-shot standalone detections (not found by L1/L2).
+      zs_agreement     — {value_name: zs_confidence} for values in already_detected
+                         that zero-shot also confirmed at >= zeroshot_threshold.
+                         Caller applies agreement boost to those signals.
+    """
+    try:
+        from core.structural_layer import layer3_signals
+        candidate_values = [s["value_name"] for s in already_detected]
+        return layer3_signals(
+            text=text,
+            significance=significance,
+            doc_type=doc_type,
+            candidate_values=candidate_values,
+            zeroshot_threshold=cfg.zeroshot_threshold,
+            zeroshot_standalone_threshold=cfg.zeroshot_standalone_threshold,
+            zeroshot_enabled=cfg.zeroshot_enabled,
+        )
+    except Exception:
+        return 0.0, [], {}
+
+
+# ---------------------------------------------------------------------------
+# Layer 3c helper — MFT classifier
+# ---------------------------------------------------------------------------
+
+def _mft_signals(text: str, cfg) -> dict:
+    """
+    Run MFT classifier on the passage.
+    Returns the mft_classifier.mft_signals() dict (boosted_values, vice_flags).
+    Fail-open: returns empty dict on any error or when disabled.
+    """
+    try:
+        from core.mft_classifier import mft_signals
+        return mft_signals(
+            text,
+            min_virtue_score=cfg.mft_min_virtue_score,
+            min_vice_score=cfg.mft_min_vice_score,
+        )
+    except Exception:
+        return {"boosted_values": [], "vice_flags": []}
+
+
 # ---------------------------------------------------------------------------
 # Disambiguation — §7.7
 # ---------------------------------------------------------------------------
@@ -458,6 +599,7 @@ def process_figure(session_id: str) -> int:
     try:
         return _run_extraction(session_id)
     except Exception:
+        _log.exception("process_figure failed for %s", session_id)
         return 0
 
 
@@ -479,7 +621,7 @@ def _run_extraction(session_id: str) -> int:
     now = time.time()
     latest_ts = watermark
     _passage_idx = 0
-    _apy_window_n = cfg.__dict__.get('apy_context_window_n', 5)
+    _apy_window_n = cfg.apy_context_window_n
 
     for row in passages[:_MAX_PASSAGES_PER_RUN]:
         text = str(row["text"])
@@ -487,49 +629,161 @@ def _run_extraction(session_id: str) -> int:
         doc_type = str(row["doc_type"])
         ts = float(row["ts"])
         record_id = str(row["id"])
+        # Phase 3 — temporal/translation calibration
+        source_auth  = float(row["source_authenticity"]) if row["source_authenticity"] is not None else 1.0
+        pub_year_val = row["pub_year"]  # may be None
 
         if significance < cfg.min_significance_threshold or not text:
             latest_ts = max(latest_ts, ts)
             continue
 
-        signals = extract_value_signals(text, record_id, significance, doc_type)
-        for sig in signals:
-            resistance = compute_resistance(text, significance, doc_type)
-            if resistance < cfg.min_resistance_threshold:
-                continue
+        # Keyword signals (Layer 1)
+        kw_signals = extract_value_signals(text, record_id, significance, doc_type)
+        for s in kw_signals:
+            s["source"] = "keyword"
 
-            val_store.record_observation(
-                session_id=session_id,
-                turn_id=record_id,
-                record_id=record_id,
-                ts=ts,
-                value_name=sig["value_name"],
-                text_excerpt=sig["text_excerpt"],
-                significance=significance,
-                resistance=resistance,
-                disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
-                doc_type=doc_type,
-            )
-            val_store.upsert_registry(
-                session_id=session_id,
-                value_name=sig["value_name"],
-                significance=significance,
-                resistance=resistance,
-                ts=ts,
-                doc_type=doc_type,
-            )
-            # Cross-figure aggregate (session_id='')
-            val_store.upsert_registry(
-                session_id="",
-                value_name=sig["value_name"],
-                significance=significance,
-                resistance=resistance,
-                ts=ts,
-                doc_type=doc_type,
-            )
-            recorded += 1
+        # Lexicon signals (Layer 1b) — MFD2.0 + MoralStrength virtue matches
+        lex_signals: List[Dict] = []
+        if cfg.lexicon_enabled:
+            lex_signals = _lexicon_signals(text, significance, doc_type, cfg)
+
+        # Semantic signals (Layer 2) — only if semantic layer available
+        sem_signals = _semantic_signals(text, significance, cfg)
+
+        # Merge L1 + L1b (lexicon): boost keyword signal when lexicon agrees;
+        # add lexicon-only virtue signals if above standalone threshold.
+        kw_values = {s["value_name"] for s in kw_signals}
+        merged: List[Dict] = list(kw_signals)
+        for lex in lex_signals:
+            if lex["lexicon_polarity"] != "virtue":
+                continue  # vice signals not merged into main signal list
+            if lex["value_name"] in kw_values:
+                for kw in merged:
+                    if kw["value_name"] == lex["value_name"]:
+                        boosted = min(1.0, kw["disambiguation_confidence"]
+                                      + lex["disambiguation_confidence"] * 0.15)
+                        kw["disambiguation_confidence"] = round(boosted, 4)
+                        if "lexicon" not in kw["source"]:
+                            kw["source"] = kw["source"] + "+lexicon"
+            elif lex["disambiguation_confidence"] >= cfg.lexicon_standalone_min_conf:
+                sig = {k: v for k, v in lex.items() if k != "lexicon_polarity"}
+                merged.append(sig)
+
+        # Merge L1+L1b + L2 (semantic): boost when both agree.
+        merged_values = {s["value_name"] for s in merged}
+        for sem in sem_signals:
+            if sem["value_name"] in merged_values:
+                for s in merged:
+                    if s["value_name"] == sem["value_name"]:
+                        boosted = min(1.0, s["disambiguation_confidence"]
+                                      + sem["disambiguation_confidence"] * 0.20)
+                        s["disambiguation_confidence"] = round(boosted, 4)
+                        if "semantic" not in s["source"]:
+                            s["source"] = s["source"] + "+semantic"
+            else:
+                merged.append(sem)
+
+        # Layer 3 — structural patterns + zero-shot entailment
+        struct_score = 0.0
+        if cfg.layer3_enabled:
+            struct_score, l3_new, zs_agreement = _layer3_signals(text, significance,
+                                                                  doc_type, merged, cfg)
+            # Boost confidence of existing signals with structural evidence
+            if struct_score > 0.0:
+                boost = round(struct_score * cfg.structural_resistance_boost, 4)
+                for s in merged:
+                    s["disambiguation_confidence"] = round(
+                        min(1.0, s["disambiguation_confidence"] + boost), 4
+                    )
+                    if "structural" not in s["source"]:
+                        s["source"] = s["source"] + "+structural"
+            # Zero-shot agreement boost for signals already detected by L1/L2
+            for s in merged:
+                if s["value_name"] in zs_agreement:
+                    zs_conf = zs_agreement[s["value_name"]]
+                    extra = cfg.zeroshot_agreement_boost * zs_conf
+                    s["disambiguation_confidence"] = round(
+                        min(1.0, s["disambiguation_confidence"] + extra), 4
+                    )
+                    if "zeroshot" not in s["source"]:
+                        s["source"] = s["source"] + "+zeroshot"
+            # New zero-shot detections not found by L1/L2
+            merged.extend(l3_new)
+
+        # Layer 3c — MFT classifier
+        if cfg.mft_enabled:
+            mft = _mft_signals(text, cfg)
+            merged_values = {s["value_name"] for s in merged}
+            for hint in mft["boosted_values"]:
+                vname = hint["value_name"]
+                score = hint["score"]
+                if vname in merged_values:
+                    boost = round(score * cfg.mft_agreement_boost, 4)
+                    for s in merged:
+                        if s["value_name"] == vname:
+                            s["disambiguation_confidence"] = round(
+                                min(1.0, s["disambiguation_confidence"] + boost), 4
+                            )
+                            if "mft" not in s["source"]:
+                                s["source"] = s["source"] + "+mft"
+                elif score >= cfg.mft_standalone_threshold:
+                    merged.append({
+                        "value_name":               vname,
+                        "text_excerpt":             text[:200],
+                        "significance":             significance,
+                        "disambiguation_confidence": round(score * cfg.mft_standalone_weight, 4),
+                        "source":                   "mft",
+                    })
+                    merged_values.add(vname)
+
+        # Phase 3 — apply temporal/translation calibration to all signal confidences
+        if source_auth < 1.0 or pub_year_val is not None:
+            from core.temporal_layer import calibrate_confidence, pub_year_discount
+            yr_discount = pub_year_discount(pub_year_val)
+            for s in merged:
+                s["disambiguation_confidence"] = calibrate_confidence(
+                    s["disambiguation_confidence"], source_auth, yr_discount
+                )
+
+        # Resistance is passage-scoped (depends only on text/significance/doc_type),
+        # so compute once and skip the entire passage if below threshold.
+        resistance = compute_resistance(text, significance, doc_type)
+
+        if resistance >= cfg.min_resistance_threshold:
+            for sig in merged:
+                val_store.record_observation(
+                    session_id=session_id,
+                    turn_id=record_id,
+                    record_id=record_id,
+                    ts=ts,
+                    value_name=sig["value_name"],
+                    text_excerpt=sig["text_excerpt"],
+                    significance=significance,
+                    resistance=resistance,
+                    disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
+                    doc_type=doc_type,
+                )
+                val_store.upsert_registry(
+                    session_id=session_id,
+                    value_name=sig["value_name"],
+                    significance=significance,
+                    resistance=resistance,
+                    ts=ts,
+                    doc_type=doc_type,
+                )
+                # Cross-figure aggregate (session_id='')
+                val_store.upsert_registry(
+                    session_id="",
+                    value_name=sig["value_name"],
+                    significance=significance,
+                    resistance=resistance,
+                    ts=ts,
+                    doc_type=doc_type,
+                )
+                recorded += 1
 
         # Write APY pressure context if this passage has pressure markers
+        # (independent of resistance — APY context is useful even for weak passages)
         apy_markers = [m.group(0).lower() for m in _APY_PRESSURE_RE_INGEST.finditer(text)]
         if apy_markers:
             val_store.write_apy_context(

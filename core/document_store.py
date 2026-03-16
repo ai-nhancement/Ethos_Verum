@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
@@ -8,20 +9,25 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
+_log = logging.getLogger(__name__)
+
 _DB_PATH = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "data", "documents.db"))
 
 _DDL = """
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS passages (
-    id          TEXT PRIMARY KEY,
-    figure_name TEXT NOT NULL,
-    session_id  TEXT NOT NULL,
-    text        TEXT NOT NULL,
-    doc_type    TEXT NOT NULL,
-    significance REAL NOT NULL DEFAULT 0.90,
-    ts          REAL NOT NULL,
-    ingested_at REAL NOT NULL
+    id                  TEXT PRIMARY KEY,
+    figure_name         TEXT NOT NULL,
+    session_id          TEXT NOT NULL,
+    text                TEXT NOT NULL,
+    doc_type            TEXT NOT NULL,
+    significance        REAL NOT NULL DEFAULT 0.90,
+    ts                  REAL NOT NULL,
+    ingested_at         REAL NOT NULL,
+    source_lang         TEXT NOT NULL DEFAULT 'unknown',
+    source_authenticity REAL NOT NULL DEFAULT 1.0,
+    pub_year            INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_passages_session ON passages (session_id, ts);
@@ -32,27 +38,56 @@ CREATE TABLE IF NOT EXISTS watermarks (
 );
 """
 
+# Migration: add Phase 3 columns to existing databases
+_MIGRATIONS = [
+    "ALTER TABLE passages ADD COLUMN source_lang TEXT NOT NULL DEFAULT 'unknown'",
+    "ALTER TABLE passages ADD COLUMN source_authenticity REAL NOT NULL DEFAULT 1.0",
+    "ALTER TABLE passages ADD COLUMN pub_year INTEGER",
+]
+
 
 class DocumentStore:
     def __init__(self, db_path: str = _DB_PATH) -> None:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        if db_path != ":memory:":
+            parent = os.path.dirname(db_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         self._db_path = db_path
         self._lock = threading.Lock()
+        # For :memory: databases, reuse a single connection (each new connection
+        # opens a separate empty in-memory database)
+        self._shared_conn: Optional[sqlite3.Connection] = None
+        if db_path == ":memory:":
+            self._shared_conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._shared_conn.row_factory = sqlite3.Row
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self._db_path, timeout=10)
+        if self._shared_conn is not None:
+            return self._shared_conn
+        conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
+
+    def _close(self, conn: sqlite3.Connection) -> None:
+        """Close connection unless it is the shared in-memory connection."""
+        if conn is not self._shared_conn:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._lock:
             conn = self._connect()
             try:
                 conn.executescript(_DDL)
+                # Apply migrations for existing databases (ignore if column exists)
+                for stmt in _MIGRATIONS:
+                    try:
+                        conn.execute(stmt)
+                    except Exception:
+                        pass  # Column already exists
                 conn.commit()
             finally:
-                conn.close()
+                self._close(conn)
 
     def insert_passage(
         self,
@@ -62,6 +97,9 @@ class DocumentStore:
         doc_type: str,
         significance: float = 0.90,
         ts: Optional[float] = None,
+        source_lang: str = "unknown",
+        source_authenticity: float = 1.0,
+        pub_year: Optional[int] = None,
     ) -> str:
         passage_id = str(uuid.uuid4())
         now = time.time()
@@ -71,14 +109,17 @@ class DocumentStore:
             try:
                 conn.execute(
                     """
-                    INSERT INTO passages (id, figure_name, session_id, text, doc_type, significance, ts, ingested_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO passages
+                      (id, figure_name, session_id, text, doc_type, significance,
+                       ts, ingested_at, source_lang, source_authenticity, pub_year)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (passage_id, figure_name, session_id, text, doc_type, significance, ts, now),
+                    (passage_id, figure_name, session_id, text, doc_type, significance,
+                     ts, now, source_lang, source_authenticity, pub_year),
                 )
                 conn.commit()
             finally:
-                conn.close()
+                self._close(conn)
         return passage_id
 
     def get_passages_since(self, session_id: str, since_ts: float) -> List[sqlite3.Row]:
@@ -91,7 +132,7 @@ class DocumentStore:
                 ).fetchall()
                 return list(rows)
             finally:
-                conn.close()
+                self._close(conn)
 
     def get_watermark(self, session_id: str) -> float:
         with self._lock:
@@ -103,7 +144,7 @@ class DocumentStore:
                 ).fetchone()
                 return row["last_processed_ts"] if row else -1_000_000_000_000.0
             finally:
-                conn.close()
+                self._close(conn)
 
     def set_watermark(self, session_id: str, ts: float) -> None:
         with self._lock:
@@ -116,7 +157,7 @@ class DocumentStore:
                 )
                 conn.commit()
             finally:
-                conn.close()
+                self._close(conn)
 
     def count_passages(self, session_id: str) -> int:
         with self._lock:
@@ -128,7 +169,7 @@ class DocumentStore:
                 ).fetchone()
                 return row["n"] if row else 0
             finally:
-                conn.close()
+                self._close(conn)
 
     def list_figures(self) -> List[sqlite3.Row]:
         with self._lock:
@@ -140,7 +181,7 @@ class DocumentStore:
                     "FROM passages GROUP BY session_id ORDER BY first_ingested DESC"
                 ).fetchall())
             finally:
-                conn.close()
+                self._close(conn)
 
 
 _instance: Optional[DocumentStore] = None
