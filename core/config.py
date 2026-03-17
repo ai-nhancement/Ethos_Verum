@@ -2,6 +2,46 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
+# ---------------------------------------------------------------------------
+# Document type authenticity — single source of truth for both modules.
+#
+# resistance_bonus  : added to base resistance score during extraction
+#                     (core/resistance.py)
+# training_weight   : multiplied against significance when building training
+#                     records (cli/export.py)
+# default_significance : used when the caller does not supply a significance
+#                     score at ingest time (cli/ingest.py, api)
+#
+# Relationship: training_weight = 0.8 + resistance_bonus
+# This preserves the authenticity hierarchy in both contexts and keeps
+# speech at a slight penalty (0.90) relative to unknown (1.00).
+# ---------------------------------------------------------------------------
+
+DOC_TYPE_RESISTANCE_BONUS: dict = {
+    "action":  0.40,   # documented real-world behavior — highest authenticity
+    "journal": 0.35,   # private writing, no audience pressure
+    "letter":  0.30,   # directed correspondence
+    "speech":  0.10,   # public address — highest performance pressure
+    "unknown": 0.20,   # default
+}
+
+DOC_TYPE_TRAINING_WEIGHT: dict = {
+    "action":  1.20,   # 0.80 + 0.40
+    "journal": 1.15,   # 0.80 + 0.35
+    "letter":  1.10,   # 0.80 + 0.30
+    "speech":  0.90,   # 0.80 + 0.10  (slight penalty — performance context)
+    "unknown": 1.00,   # 0.80 + 0.20
+}
+
+DOC_TYPE_DEFAULT_SIGNIFICANCE: dict = {
+    "action":  0.90,   # observed behavior under stakes
+    "journal": 0.85,   # private writing
+    "letter":  0.80,   # directed correspondence
+    "speech":  0.70,   # public address — performance pressure
+    "unknown": 0.75,   # default
+}
+
+
 @dataclass
 class Config:
     min_significance_threshold: float = 0.10

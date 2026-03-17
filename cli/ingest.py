@@ -50,7 +50,6 @@ from core.value_store import get_value_store
 _log = logging.getLogger(__name__)
 
 _MAX_PASSAGE_CHARS = 450
-_DEFAULT_SIGNIFICANCE = 0.90
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
 _SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
 _FIGURE_NAME_RE = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$')
@@ -95,7 +94,7 @@ def ingest(
     source_file: str,
     document_type: str,
     pub_year: int | None = None,
-    significance: float = _DEFAULT_SIGNIFICANCE,
+    significance: float | None = None,
     is_translation: bool | None = None,
     dry_run: bool = False,
     extract: bool = True,
@@ -201,8 +200,8 @@ def main() -> int:
                         help="Publication/composition year (for timestamp ordering + temporal discount)")
     parser.add_argument("--translation", action="store_true", default=False,
                         help="Declare this document is a translation (sets source_authenticity=0.85)")
-    parser.add_argument("--significance", type=float, default=_DEFAULT_SIGNIFICANCE,
-                        help=f"Significance score for all passages (default {_DEFAULT_SIGNIFICANCE})")
+    parser.add_argument("--significance", type=float, default=None,
+                        help="Significance score for all passages (default: auto from doc-type)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview segmentation only — no DB writes")
     parser.add_argument("--no-extract", action="store_true",

@@ -55,23 +55,11 @@ _log = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
-from core.config import is_tension_pair
+from core.config import is_tension_pair, DOC_TYPE_TRAINING_WEIGHT as _DOC_TYPE_WEIGHT
 
 _VALUES_DB = str(_ROOT / "data" / "values.db")
+_DOCS_DB   = str(_ROOT / "data" / "documents.db")
 _DEFAULT_OUTPUT_DIR = str(_ROOT / "output" / "ric")
-
-# ---------------------------------------------------------------------------
-# Document-type training weights
-# Higher weight = more authentic source signal
-# ---------------------------------------------------------------------------
-
-_DOC_TYPE_WEIGHT = {
-    "action":  1.5,
-    "journal": 1.4,
-    "letter":  1.2,
-    "speech":  0.8,
-    "unknown": 1.0,
-}
 
 # ---------------------------------------------------------------------------
 # Text marker sets
@@ -449,6 +437,7 @@ def build_training_records(
             "disambiguation_confidence": round(float(obs.get("disambiguation_confidence", 1.0)), 4),
             "observation_consistency":   round(float(obs.get("observation_consistency", 0.5)), 4),
             "pressure_source_id":        pressure_source_id,
+            "pressure_context":          bool(pressure_source_id),
             "deferred_apy_lag_s":        deferred_apy_lag_s,
             "deferred_apy_lag_n":        deferred_apy_lag_n,
         })
@@ -509,6 +498,73 @@ def _print_stats(records: List[Dict[str, Any]], label: str = "All") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Contrastive pair builder
+# ---------------------------------------------------------------------------
+
+def _build_contrastive_pairs(
+    records: List[Dict[str, Any]],
+    doc_db_path: str = _DOCS_DB,
+) -> List[Dict[str, Any]]:
+    """
+    Build contrastive (pressure, failure) pairs from APY records with a
+    confirmed pressure source.
+
+    Each pair:
+      pressure_passage — the passage that triggered pressure (from documents.db)
+      failure_passage  — the APY/P0 passage where the value was abandoned
+      value_name, figure, label, training_weight, pressure_source_id
+
+    Only APY records with pressure_context=True are included.
+    Records whose pressure_source_id is not found in documents.db are skipped.
+    Returns [] on any error; never raises.
+    """
+    apy_with_ctx = [r for r in records if r.get("pressure_context") and r.get("label") == "APY"]
+    if not apy_with_ctx:
+        return []
+
+    # Collect all pressure_source_ids to look up in one query
+    source_ids = list({r["pressure_source_id"] for r in apy_with_ctx})
+
+    pressure_texts: Dict[str, str] = {}
+    try:
+        conn = sqlite3.connect(doc_db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        placeholders = ",".join("?" * len(source_ids))
+        rows = conn.execute(
+            f"SELECT id, text FROM passages WHERE id IN ({placeholders})",
+            source_ids,
+        ).fetchall()
+        pressure_texts = {r["id"]: r["text"] for r in rows}
+        conn.close()
+    except Exception:
+        _log.warning("_build_contrastive_pairs: could not fetch pressure passages", exc_info=True)
+        return []
+
+    pairs = []
+    for rec in apy_with_ctx:
+        src_id = rec["pressure_source_id"]
+        p_text = pressure_texts.get(src_id)
+        if not p_text:
+            continue  # pressure passage not found — skip
+        pairs.append({
+            "id":                  str(uuid.uuid4()),
+            "figure":              rec["figure"],
+            "value_name":          rec["value_name"],
+            "pressure_record_id":  src_id,
+            "pressure_passage":    p_text[:500],
+            "failure_record_id":   rec["record_id"],
+            "failure_passage":     rec["text_excerpt"],
+            "failure_label":       rec["label"],
+            "deferred_apy_lag_s":  rec["deferred_apy_lag_s"],
+            "deferred_apy_lag_n":  rec["deferred_apy_lag_n"],
+            "resistance":          rec["resistance"],
+            "training_weight":     rec["training_weight"],
+        })
+
+    return pairs
+
+
+# ---------------------------------------------------------------------------
 # Export main
 # ---------------------------------------------------------------------------
 
@@ -523,6 +579,8 @@ def export(
     include_ambiguous: bool = True,
     min_consistency: float = 0.0,
     value_tension: bool = False,
+    contrastive_pairs: bool = False,
+    doc_db_path: str = _DOCS_DB,
 ) -> int:
     _log.info("Reading observations from %s", db_path)
     observations = _read_figure_observations(db_path, figure_filter)
@@ -653,6 +711,18 @@ def export(
         else:
             _log.info("Tensions: none detected")
 
+    # Contrastive pairs export (opt-in via --contrastive-pairs)
+    if contrastive_pairs and not dry_run:
+        pairs = _build_contrastive_pairs(records, doc_db_path)
+        if pairs:
+            pairs_path = os.path.join(output_dir, "ric_contrastive_pairs.jsonl")
+            n_p = _write_jsonl(pairs_path, pairs)
+            _log.info("Contrastive pairs  %d pairs -> %s", n_p, pairs_path)
+            report["output_files"]["contrastive_pairs"] = pairs_path
+            report["contrastive_pair_count"] = len(pairs)
+        else:
+            _log.info("Contrastive pairs: none found (need APY records with pressure_source_id)")
+
     report_path = os.path.join(output_dir, "ric_historical_report.json")
     os.makedirs(os.path.dirname(report_path), exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
@@ -695,6 +765,10 @@ def main() -> int:
                         help=f"Path to values.db (default {_VALUES_DB})")
     parser.add_argument("--value-tension", action="store_true",
                         help="Detect and export value tension events to ric_value_tensions.jsonl")
+    parser.add_argument("--contrastive-pairs", action="store_true",
+                        help="Export (pressure, failure) APY contrastive pairs to ric_contrastive_pairs.jsonl")
+    parser.add_argument("--doc-db", default=_DOCS_DB,
+                        help=f"Path to documents.db for contrastive pair lookup (default {_DOCS_DB})")
     args = parser.parse_args()
 
     export(
@@ -708,6 +782,8 @@ def main() -> int:
         include_ambiguous=not args.no_ambiguous,
         min_consistency=args.min_consistency,
         value_tension=args.value_tension,
+        contrastive_pairs=args.contrastive_pairs,
+        doc_db_path=args.doc_db,
     )
     return 0
 

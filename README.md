@@ -9,7 +9,7 @@ Ethos extracts behavioral evidence of human values from historical documents and
 - **Three-class labeling** — P1 (held under resistance), P0 (failed), APY (Answer-Pressure Yield — abandoned under pressure)
 - **Spectrum principle** — signal extracted from the full human spectrum, not just saints or villains
 
-The pipeline is fully deterministic. No LLM calls in the core extraction path. Reproducible by design.
+No generative LLM calls in the core extraction path. The keyword, lexicon, and structural layers are fully deterministic. The semantic (BGE embeddings) and zero-shot classifier layers are deterministic given fixed model weights; exact reproducibility requires pinning `sentence-transformers` and `transformers` package versions and using consistent GPU/CPU precision.
 
 ---
 

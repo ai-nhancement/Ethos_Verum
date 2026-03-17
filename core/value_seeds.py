@@ -488,3 +488,228 @@ def get_seeds() -> Dict[str, List[str]]:
 def seed_count_summary() -> Dict[str, int]:
     """Return {value_name: seed_count} for all 15 values."""
     return {k: len(v) for k, v in SEED_SENTENCES.items()}
+
+
+# ---------------------------------------------------------------------------
+# Failure seed sentences — value violated or abandoned.
+#
+# These are embedded into a second Qdrant collection (ethos_failure_prototypes)
+# so the semantic layer can detect passages semantically similar to failure
+# events, not just passages similar to positive demonstrations.
+#
+# Design principles:
+#   1. Each seed shows the value being actively broken, not merely absent.
+#   2. Spans modern, archaic, first-person, and biographical registers.
+#   3. Includes failure under pressure (the subject chose wrongly despite stakes)
+#      and failure without pressure (rationalization, avoidance, neglect).
+#   4. 10-12 seeds per value — enough for a stable failure centroid.
+# ---------------------------------------------------------------------------
+
+FAILURE_SEEDS: Dict[str, List[str]] = {
+
+    "integrity": [
+        "I told them what they wanted to hear, knowing it was not true.",
+        "I signed the document even though I knew the figures had been altered.",
+        "I looked her in the eye and lied about what I had done.",
+        "I concealed the evidence because the truth would have cost me too much.",
+        "He falsified the report to protect himself from scrutiny.",
+        "She misled the inquiry rather than face the consequences of the truth.",
+        "He gave a false account of the events and allowed an innocent man to suffer for it.",
+        "She deceived those who trusted her and used that trust against them.",
+        "He would not admit what he had done, even when confronted with the proof.",
+        "She fabricated the data because the real results did not support the conclusion she needed.",
+    ],
+
+    "courage": [
+        "I ran when I should have stayed.",
+        "I said nothing because I was afraid of what they would do to me.",
+        "I backed down the moment they pushed back — I could not hold my ground.",
+        "I knew it was wrong but I was too frightened to speak.",
+        "He fled when his comrades needed him to stand.",
+        "She capitulated immediately under the first sign of real pressure.",
+        "He retreated rather than face what he knew had to be faced.",
+        "She chose her own safety over what was right and she knew it.",
+        "He walked away from the fight he had started the moment it became dangerous.",
+        "She had the chance to act and did not take it, and she has regretted it since.",
+    ],
+
+    "compassion": [
+        "I turned away from their suffering because I did not want it to cost me anything.",
+        "I hardened my heart and told myself it was not my problem.",
+        "I walked past without stopping, knowing what I was leaving behind.",
+        "He was indifferent to the pain of those beneath him.",
+        "She dismissed their suffering as something they had brought upon themselves.",
+        "He refused to extend mercy when mercy was what the situation required.",
+        "She treated those in her care as inconveniences rather than people.",
+        "He showed no sympathy to those who came to him for help.",
+        "She remained unmoved by distress that would have affected anyone with feeling.",
+        "He abandoned those who depended on him without a second thought.",
+    ],
+
+    "commitment": [
+        "I gave up when it became harder than I expected.",
+        "I broke my promise when keeping it became inconvenient.",
+        "I abandoned the work before it was finished because I wanted out.",
+        "He walked away from what he had pledged the moment the rewards stopped coming.",
+        "She reneged on everything she had promised those who had believed in her.",
+        "He deserted the cause as soon as it cost him something personal.",
+        "She gave up at the first serious obstacle and made excuses for it.",
+        "He forgot every obligation the moment a better opportunity appeared.",
+        "She had sworn to see it through and walked away when it was most needed.",
+        "He did not finish what he started and left others to carry the consequences.",
+    ],
+
+    "patience": [
+        "I acted rashly when waiting would have served far better.",
+        "I could not endure the delay and forced a conclusion before it was ready.",
+        "I lost my temper and made everything worse.",
+        "He acted impulsively and destroyed years of careful preparation in an instant.",
+        "She could not wait and forced the issue before the moment was right.",
+        "He reacted before thinking and the consequences fell on everyone around him.",
+        "She made the rash decision and refused to admit it had been a mistake.",
+        "He had no capacity for delay and it cost him every advantage he had built.",
+        "She snapped under the pressure of waiting and said what could not be unsaid.",
+        "He moved too soon and collapsed everything he had worked to build.",
+    ],
+
+    "responsibility": [
+        "I shifted the blame onto those beneath me rather than accept that it was my failure.",
+        "I deflected every question and refused to acknowledge any part in what had happened.",
+        "I denied responsibility until it became impossible to deny.",
+        "He evaded accountability behind procedural excuses.",
+        "She passed the consequences of her decisions down to those who could not refuse them.",
+        "He refused to acknowledge his role and allowed others to be blamed instead.",
+        "She made the decision and then pretended she had not, leaving others to answer for it.",
+        "He had been given the charge and when it failed he acted as if it had never been his.",
+        "She denied her culpability and constructed a narrative that protected herself at others' expense.",
+        "He was responsible for the outcome and never once owned it.",
+    ],
+
+    "fairness": [
+        "I gave the outcome I had already decided on, regardless of the evidence.",
+        "I treated them differently because of who they were, not what they had done.",
+        "I applied a harsher standard to those I disliked and a lenient one to those I favored.",
+        "He ruled in favor of the powerful and called it justice.",
+        "She discriminated against them and justified it with reasoning she would not have accepted in reverse.",
+        "He denied them what was due and kept what was not his to keep.",
+        "She refused to hear their case fairly and her bias was visible to all.",
+        "He was prejudiced against them from the beginning and the judgment reflected it.",
+        "She gave the favored party every advantage and the other party nothing.",
+        "He used the authority given him to advance his own interests at the expense of those he was meant to serve.",
+    ],
+
+    "gratitude": [
+        "I took what had been given me as though it were owed and never acknowledged the debt.",
+        "I forgot those who had helped me once I no longer needed them.",
+        "I treated their generosity as my entitlement and gave nothing back.",
+        "He accepted every advantage and acknowledged none of them.",
+        "She took credit for what others had built and did not name them.",
+        "He turned against those who had supported him when they could no longer serve his purposes.",
+        "She took for granted everything that had been sacrificed to give her the position she occupied.",
+        "He never thanked the people who had made him possible.",
+        "She regarded what had been given her as her due and behaved accordingly.",
+        "He abandoned those who had invested in him and never looked back.",
+    ],
+
+    "curiosity": [
+        "I dismissed the question without investigation because the answer threatened what I already believed.",
+        "I refused to look more closely because I preferred not to know.",
+        "I accepted the received explanation and never asked whether it was true.",
+        "He rejected the evidence without examination because it contradicted his position.",
+        "She closed off the line of inquiry when it became inconvenient.",
+        "He refused to question what those in authority told him.",
+        "She was incurious about anything that fell outside what she already understood.",
+        "He dismissed the unexpected finding rather than investigate what it meant.",
+        "She had no interest in understanding anything that could not serve her immediate purposes.",
+        "He stopped asking questions the moment the answers began to trouble him.",
+    ],
+
+    "resilience": [
+        "I gave up after the first real setback.",
+        "I could not recover from the loss and never tried.",
+        "I surrendered to despair rather than find a way back.",
+        "He broke under the pressure and never found a way to reassemble himself.",
+        "She gave in to defeat when persistence was still possible.",
+        "He quit when the work became harder than he had anticipated.",
+        "She allowed what had happened to define and diminish her permanently.",
+        "He never tried again after the failure and spent the rest of his life in retreat.",
+        "She abandoned the effort and called it realism.",
+        "He let the setback become the end of the story rather than one chapter of it.",
+    ],
+
+    "love": [
+        "I abandoned them when staying would have cost me too much.",
+        "I put my own comfort above what they needed from me.",
+        "I left when leaving was the easier thing to do.",
+        "He forsook those who had depended on him the moment his own interests shifted.",
+        "She turned away from those she had claimed to love when they became difficult to love.",
+        "He used the bond as a means and discarded it when it no longer served him.",
+        "She betrayed those who had trusted her most completely.",
+        "He walked away and did not look back.",
+        "She chose herself every time, regardless of what it cost those who loved her.",
+        "He let what mattered most to him be destroyed by what mattered least.",
+    ],
+
+    "growth": [
+        "I refused to reconsider my position despite clear evidence that I was wrong.",
+        "I was too proud to admit what the experience had shown me.",
+        "I repeated the same mistakes because I would not examine what had caused them.",
+        "He stagnated willfully, defending his errors rather than learning from them.",
+        "She refused to change her thinking even when it had demonstrably failed.",
+        "He rejected every challenge to what he believed and called it integrity.",
+        "She dismissed criticism that was accurate because it came from someone she disliked.",
+        "He could not learn from failure because he could not admit it had been failure.",
+        "She was too proud to be taught and too certain to be changed.",
+        "He stayed wrong rather than go through the discomfort of becoming right.",
+    ],
+
+    "independence": [
+        "I surrendered my judgment entirely to those who had power over me.",
+        "I said what they wanted to hear rather than what I believed.",
+        "I abandoned my own conclusions the moment they became inconvenient to those in authority.",
+        "He gave up his autonomy for security and spent the rest of his life in a cage he had accepted.",
+        "She allowed others to determine what she believed and what she would do.",
+        "He subordinated every conviction to the demands of those who controlled his prospects.",
+        "She was controlled entirely by what others expected of her.",
+        "He never made a genuinely independent decision in his life.",
+        "She surrendered her freedom of judgment without understanding what she was surrendering.",
+        "He allowed himself to be directed by those he should have questioned.",
+    ],
+
+    "loyalty": [
+        "I betrayed them when it would have cost me too much to stay faithful.",
+        "I deserted those who had depended on me the moment it became dangerous to stand with them.",
+        "I turned against them to protect myself.",
+        "He defected and gave information that destroyed those who had trusted him.",
+        "She abandoned the people she had pledged herself to when a better option appeared.",
+        "He betrayed every confidence placed in him when the pressure became sufficient.",
+        "She turned on those she had worked beside and called it necessity.",
+        "He deserted the cause at the moment it needed him most.",
+        "She gave them away to save herself and lived with that for the rest of her life.",
+        "He broke faith with those who had never doubted him.",
+    ],
+
+    "humility": [
+        "I refused to acknowledge the error even when it was undeniable.",
+        "I could not admit I had been wrong because my reputation meant more to me than the truth.",
+        "I defended what I had done instead of what was right.",
+        "He refused to concede the point to someone he regarded as beneath him.",
+        "She could not accept correction and made enemies of those who offered it honestly.",
+        "He had too high an opinion of his own judgment to learn from its failures.",
+        "She dismissed the criticism without examination because it threatened her self-image.",
+        "He could not bring himself to say he had been wrong and allowed the damage to spread.",
+        "She was too proud to acknowledge what those around her could see clearly.",
+        "He treated his own errors as the errors of others and paid no cost for the confusion.",
+    ],
+
+}
+
+
+def get_failure_seeds() -> Dict[str, List[str]]:
+    """Return the failure seed dictionary."""
+    return FAILURE_SEEDS
+
+
+def failure_seed_count_summary() -> Dict[str, int]:
+    """Return {value_name: failure_seed_count} for all 15 values."""
+    return {k: len(v) for k, v in FAILURE_SEEDS.items()}

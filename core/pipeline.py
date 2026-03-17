@@ -21,7 +21,7 @@ from typing import List, Optional
 _log = logging.getLogger(__name__)
 
 _MAX_PASSAGE_CHARS   = 450
-_DEFAULT_SIGNIFICANCE = 0.90
+_DEFAULT_SIGNIFICANCE = 0.75  # fallback when doc_type is unrecognised
 _FIGURE_NAME_RE      = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$')
 _SENTENCE_SPLIT_RE   = re.compile(r'(?<=[.!?])\s+')
 
@@ -66,7 +66,7 @@ def ingest_text(
     doc_type: str = "unknown",
     pub_year: Optional[int] = None,
     is_translation: Optional[bool] = None,
-    significance: float = _DEFAULT_SIGNIFICANCE,
+    significance: Optional[float] = None,
     run_extract: bool = True,
 ) -> IngestResult:
     """
@@ -74,8 +74,19 @@ def ingest_text(
 
     Handles language detection, archaic preprocessing, segmentation,
     DB insertion, and extraction. Returns an IngestResult.
+
+    When significance is None (the default), it is auto-inferred from
+    doc_type using DOC_TYPE_DEFAULT_SIGNIFICANCE — e.g., 'action' → 0.90,
+    'speech' → 0.70. Pass an explicit value to override.
+
     Never raises.
     """
+    # Auto-infer significance from doc_type when caller does not supply one
+    if significance is None:
+        from core.config import DOC_TYPE_DEFAULT_SIGNIFICANCE
+        dt_key = (doc_type or "unknown").lower().strip()
+        significance = DOC_TYPE_DEFAULT_SIGNIFICANCE.get(dt_key, _DEFAULT_SIGNIFICANCE)
+
     if not _FIGURE_NAME_RE.match(figure_name):
         return IngestResult(
             figure_name=figure_name, session_id="", passages_ingested=0,

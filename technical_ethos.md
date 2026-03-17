@@ -262,6 +262,35 @@ from core.value_extractor import VALUE_VOCAB
 
 **Phase 1** adds semantic embedding (BGE-large + Qdrant) alongside keyword detection — passages where the value is present but no keyword fires are caught by the embedding layer.
 
+### 4.1 VIA Character Strengths Mapping
+
+The 15 Ethos values map to the VIA Classification of Character Strengths (Peterson & Seligman, 2004). This anchors Ethos values in a peer-reviewed psychological taxonomy and facilitates cross-study comparability.
+
+| Ethos Value | VIA Strength | VIA Virtue Category |
+|-------------|-------------|---------------------|
+| `integrity` | Honesty (authenticity, genuineness) | Wisdom |
+| `courage` | Bravery (valor, not shrinking from threat) | Courage |
+| `compassion` | Kindness (generosity, nurturance, care) | Humanity |
+| `commitment` | Perseverance (industry, diligence) | Courage |
+| `patience` | Self-regulation (self-control, discipline) | Temperance |
+| `responsibility` | Prudence (discretion, caution) | Temperance |
+| `fairness` | Fairness (justice, equity) | Justice |
+| `gratitude` | Gratitude (thankfulness, appreciation) | Transcendence |
+| `curiosity` | Curiosity (interest, novelty-seeking) | Wisdom |
+| `resilience` | Perseverance + Bravery (composite) | Courage |
+| `love` | Love (capacity to give and receive love) | Humanity |
+| `growth` | Love of Learning (mastering new skills) | Wisdom |
+| `independence` | Self-regulation + Perspective (composite) | Wisdom / Temperance |
+| `loyalty` | Teamwork (citizenship, social responsibility) | Justice |
+| `humility` | Humility/Modesty | Temperance |
+
+**Notes:**
+- `resilience` is a composite of Perseverance and Bravery — VIA does not separate the two as cleanly as Ethos does.
+- `independence` maps partially to Self-regulation (directing one's own conduct) and Perspective (wise counsel); neither is a perfect fit, reflecting a genuine gap in VIA's individual-level taxonomy.
+- VIA focuses on virtues as trait-level strengths; Ethos measures demonstrated evidence under real conditions (cost-bearing), which is orthogonal to VIA's self-report framing.
+
+**Reference:** Peterson, C., & Seligman, M. E. P. (2004). *Character Strengths and Virtues: A Handbook and Classification*. Oxford University Press / American Psychological Association.
+
 ---
 
 ## 5. Resistance Scoring

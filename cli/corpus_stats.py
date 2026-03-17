@@ -50,6 +50,7 @@ def print_report(report: dict, min_figures: int = 2) -> None:
     figs = report["figures"]
     vd   = report["value_distribution"]
     res  = report["resistance"]
+    sig  = report.get("significance", {})
     cfv  = report["cross_figure_values"]
 
     # ── Overview ────────────────────────────────────────────────────────────
@@ -126,6 +127,21 @@ def print_report(report: dict, min_figures: int = 2) -> None:
             print(f"  {bucket}  {bar}  {cnt:5,}  {_pct(cnt, total_obs)}")
         print(f"\n  mean={res['mean']:.3f}  std={res['std']:.3f}  "
               f"min={res['min']:.3f}  median={res['median']:.3f}  max={res['max']:.3f}")
+
+    # ── Significance distribution ────────────────────────────────────────────
+    if sig.get("histogram"):
+        print("\n──────────────────────────────────────────────────")
+        print("  SIGNIFICANCE DISTRIBUTION")
+        print("──────────────────────────────────────────────────")
+        total_obs = sum(sig["histogram"].values()) or 1
+        for bucket, cnt in sig["histogram"].items():
+            bar = _bar(cnt, total_obs)
+            print(f"  {bucket}  {bar}  {cnt:5,}  {_pct(cnt, total_obs)}")
+        print(f"\n  mean={sig['mean']:.3f}  std={sig['std']:.3f}  "
+              f"min={sig['min']:.3f}  median={sig['median']:.3f}  max={sig['max']:.3f}")
+        if sig["std"] < 0.01:
+            print("  NOTE: low std suggests all passages use a single significance value.")
+            print("        Run cli/ingest.py without --significance to use doc-type defaults.")
 
     print("\n══════════════════════════════════════════════════\n")
 

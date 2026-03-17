@@ -275,6 +275,46 @@ VALUE_VOCAB: Dict[str, List[str]] = {
 _MIN_KEYWORD_LEN = 3
 _MAX_PASSAGES_PER_RUN = 200
 
+# ---------------------------------------------------------------------------
+# Negation detection — suppress signals where a positive keyword is negated
+# ---------------------------------------------------------------------------
+
+# Negation words that appear in a tight pre-keyword window (~30 chars, ~4-5 words).
+# If found immediately before the keyword, the signal is suppressed.
+# Example: "I was not brave" → "not" before "brave" → courage signal suppressed.
+_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no(?:\s+longer)?|without|lacks?|lacked|lacking|"
+    r"fails?\s+to|failed\s+to|unable\s+to|"
+    r"can'?t|won'?t|didn'?t|doesn'?t|wasn'?t|"
+    r"weren'?t|isn'?t|aren'?t|couldn'?t|wouldn'?t|"
+    r"hardly|barely|scarcely|seldom|rarely)\b",
+    re.IGNORECASE,
+)
+
+# Negating prefixes that attach directly to keyword characters (e.g. "dis" in "dishonest").
+_NEGATION_PREFIX_RE = re.compile(r"(?:dis|un|in|ir|im|non)-?$", re.IGNORECASE)
+
+# Keywords that are failure/violation markers — their presence in a passage
+# signals P0, not P1. The negation check is intentionally SKIPPED for these:
+# when a failure keyword is preceded by negation ("never fled", "did not betray"),
+# it becomes positive evidence — the value held.
+_FAILURE_MARKER_KWS: frozenset = frozenset({
+    "deceived", "lied", "misled", "concealed", "fabricated",
+    "cowardice", "fled", "retreated", "capitulated",
+    "indifferent", "unmoved", "turned away", "hardened my heart",
+    "abandoned", "gave up", "broke my promise", "reneged",
+    "lost patience", "could wait no longer", "acted rashly",
+    "shirked", "evaded", "deflected blame", "denied responsibility",
+    "prejudiced", "biased", "favored", "discriminated",
+    "ungrateful", "took for granted", "never thanked",
+    "incurious", "dismissed", "refused to question",
+    "broke down", "gave in", "surrendered to despair",
+    "betrayed", "deserted", "defected", "turned on",
+    "arrogance", "arrogant", "refused to admit", "could not concede",
+    "stagnated", "refused to change", "too proud to learn",
+    "subjugated", "surrendered my autonomy",
+})
+
 
 # ---------------------------------------------------------------------------
 # Semantic layer helpers
@@ -286,12 +326,16 @@ def _semantic_signals(
     cfg,
 ) -> List[Dict]:
     """
-    Run semantic prototype matching against the passage.
-    Returns a list of {value_name, text_excerpt, significance,
-    disambiguation_confidence, source} dicts.
+    Run semantic prototype matching against the passage (direction-aware).
 
-    Confidence = cosine similarity score (already in [0,1] for normalized vecs).
-    Only fires for values above cfg.semantic_threshold.
+    Queries both the hold prototype collection (value demonstrated) and the
+    failure prototype collection (value violated). A signal is only emitted
+    when the hold score exceeds the failure score for that value — preventing
+    violation passages from contributing positive evidence.
+
+    When failure prototypes are not yet built, falls back to hold-only behavior.
+
+    Confidence = hold_score - (failure_score * 0.5), scaled by semantic_weight.
     Returns [] if semantic store is unavailable or disabled.
     """
     if not cfg.semantic_enabled:
@@ -311,19 +355,39 @@ def _semantic_signals(
         if vec is None:
             return []
         store = get_semantic_store()
-        hits = store.query_passage(
+
+        # Hold prototypes: value being demonstrated
+        hold_hits = store.query_passage(
             vec,
             top_k=cfg.semantic_top_k,
             score_threshold=cfg.semantic_threshold,
         )
+
+        # Failure prototypes: value being violated.
+        # Use same threshold so only meaningful failure matches are considered.
+        failure_scores: Dict[str, float] = {}
+        if store.failure_prototypes_ready():
+            for vname, fscore in store.query_failure_passage(
+                vec,
+                top_k=cfg.semantic_top_k,
+                score_threshold=cfg.semantic_threshold,
+            ):
+                failure_scores[vname] = fscore
+
         results = []
-        for value_name, score in hits:
-            excerpt = text[:150] if len(text) <= 150 else text[:147] + "..."
+        excerpt = text[:150] if len(text) <= 150 else text[:147] + "..."
+        for value_name, hold_score in hold_hits:
+            fail_score = failure_scores.get(value_name, 0.0)
+            # Suppress: passage resembles a violation more than a demonstration
+            if fail_score >= hold_score:
+                continue
+            # Net confidence: hold lead minus failure discount
+            net_score = hold_score - (fail_score * 0.5)
             results.append({
                 "value_name": value_name,
                 "text_excerpt": excerpt,
                 "significance": significance,
-                "disambiguation_confidence": round(float(score) * cfg.semantic_weight, 4),
+                "disambiguation_confidence": round(float(net_score) * cfg.semantic_weight, 4),
                 "source": "semantic",
             })
         return results
@@ -559,6 +623,26 @@ def _check_signal(
         ctx_end   = min(len(text_lower), match_idx + len(kw) + 80)
         ctx       = text_lower[ctx_start:ctx_end]
 
+        # Check 0: negation — suppress when a positive keyword is immediately
+        # preceded by a negation word or negating prefix.
+        # Skipped for failure-marker keywords: negated failures ("never fled",
+        # "did not betray") are positive evidence and should not be suppressed.
+        kw_lower = kw.lower()
+        if kw_lower not in _FAILURE_MARKER_KWS:
+            # (a) Negating prefix directly before keyword characters — e.g. "dishonest"
+            if match_idx > 0:
+                prefix_window = text_lower[max(0, match_idx - 4):match_idx]
+                if _NEGATION_PREFIX_RE.search(prefix_window):
+                    return False, 0.0
+
+            # (b) Negation word in tight 30-char pre-keyword window.
+            #     Skipped when the keyword itself contains structural negation
+            #     ("won't give up", "did not yield") — those are positive signals.
+            if not any(s in kw_lower for s in ("not", "n't", "never", "without", "cannot")):
+                pre_window = text_lower[max(0, match_idx - 30):match_idx]
+                if _NEGATION_RE.search(pre_window):
+                    return False, 0.0
+
         # Check 1: disqualifier -- overlap-based: only block if the disqualifier
         # match overlaps with the actual keyword position (not just nearby text).
         disq = _DISQUALIFIERS.get(value_name)
@@ -749,8 +833,16 @@ def _run_extraction(session_id: str) -> int:
         # so compute once and skip the entire passage if below threshold.
         resistance = compute_resistance(text, significance, doc_type)
 
+        # Per-signal resistance modulation: when no structural adversity is detected
+        # (struct_score == 0.0), apply a 15% discount to all signals in this passage.
+        # Values mentioned in low-adversity contexts receive proportionally lower
+        # resistance credit than values mentioned in contexts with structural adversity.
+        # Scale: resistance × (0.85 + 0.15 × struct_score) → [0.85r, 1.00r]
+        struct_resistance_factor = round(0.85 + 0.15 * struct_score, 4)
+
         if resistance >= cfg.min_resistance_threshold:
             for sig in merged:
+                sig_resistance = round(resistance * struct_resistance_factor, 4)
                 val_store.record_observation(
                     session_id=session_id,
                     turn_id=record_id,
@@ -759,7 +851,7 @@ def _run_extraction(session_id: str) -> int:
                     value_name=sig["value_name"],
                     text_excerpt=sig["text_excerpt"],
                     significance=significance,
-                    resistance=resistance,
+                    resistance=sig_resistance,
                     disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
                     doc_type=doc_type,
                 )
@@ -767,7 +859,7 @@ def _run_extraction(session_id: str) -> int:
                     session_id=session_id,
                     value_name=sig["value_name"],
                     significance=significance,
-                    resistance=resistance,
+                    resistance=sig_resistance,
                     ts=ts,
                     doc_type=doc_type,
                 )
@@ -776,7 +868,7 @@ def _run_extraction(session_id: str) -> int:
                     session_id="",
                     value_name=sig["value_name"],
                     significance=significance,
-                    resistance=resistance,
+                    resistance=sig_resistance,
                     ts=ts,
                     doc_type=doc_type,
                 )

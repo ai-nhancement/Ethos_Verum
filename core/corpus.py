@@ -304,16 +304,71 @@ def get_cross_figure_values(val_db_path: str, min_figures: int = 2) -> List[Dict
 # Full report (all sections combined)
 # ---------------------------------------------------------------------------
 
+def get_significance_distribution(val_db_path: str) -> Dict:
+    """
+    Significance histogram + summary stats across all figure observations.
+
+    {
+      mean, std, min, max, median,
+      histogram: {
+        "0.0-0.2": n, "0.2-0.4": n, "0.4-0.6": n, "0.6-0.8": n, "0.8-1.0": n
+      }
+    }
+    """
+    try:
+        vconn = _open(val_db_path)
+        rows = vconn.execute(
+            """SELECT significance FROM value_observations
+               WHERE session_id LIKE 'figure:%'"""
+        ).fetchall()
+        if not rows:
+            return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "median": 0.0,
+                    "histogram": {}}
+
+        vals = [float(r["significance"]) for r in rows]
+        n = len(vals)
+        mean = sum(vals) / n
+        variance = sum((v - mean) ** 2 for v in vals) / n
+        std = variance ** 0.5
+        sorted_vals = sorted(vals)
+        mid = n // 2
+        median = sorted_vals[mid] if n % 2 else (sorted_vals[mid-1] + sorted_vals[mid]) / 2
+
+        buckets = {"0.0-0.2": 0, "0.2-0.4": 0, "0.4-0.6": 0, "0.6-0.8": 0, "0.8-1.0": 0}
+        for v in vals:
+            if   v < 0.2: buckets["0.0-0.2"] += 1
+            elif v < 0.4: buckets["0.2-0.4"] += 1
+            elif v < 0.6: buckets["0.4-0.6"] += 1
+            elif v < 0.8: buckets["0.6-0.8"] += 1
+            else:         buckets["0.8-1.0"] += 1
+
+        return {
+            "mean":      round(mean, 4),
+            "std":       round(std, 4),
+            "min":       round(min(vals), 4),
+            "max":       round(max(vals), 4),
+            "median":    round(median, 4),
+            "histogram": buckets,
+        }
+    except Exception:
+        _log.warning("get_significance_distribution failed", exc_info=True)
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "median": 0.0,
+                "histogram": {}}
+    finally:
+        _safe_close(vconn)
+
+
 def get_full_report(doc_db_path: str, val_db_path: str) -> Dict:
     """
     Return all corpus statistics in one call. Used by CLI and API.
     """
     return {
-        "overview":             get_overview(doc_db_path, val_db_path),
-        "figures":              get_figure_summaries(doc_db_path, val_db_path),
-        "value_distribution":   get_value_distribution(val_db_path),
-        "resistance":           get_resistance_distribution(val_db_path),
-        "cross_figure_values":  get_cross_figure_values(val_db_path, min_figures=2),
+        "overview":               get_overview(doc_db_path, val_db_path),
+        "figures":                get_figure_summaries(doc_db_path, val_db_path),
+        "value_distribution":     get_value_distribution(val_db_path),
+        "resistance":             get_resistance_distribution(val_db_path),
+        "significance":           get_significance_distribution(val_db_path),
+        "cross_figure_values":    get_cross_figure_values(val_db_path, min_figures=2),
     }
 
 
