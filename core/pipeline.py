@@ -120,13 +120,16 @@ def ingest_text(
 
         session_id = f"figure:{figure_name.lower().strip()}"
 
+        doc_store = get_document_store()
+        val_store = get_value_store()
+
+        existing_watermark = float(doc_store.get_watermark(session_id))
         if pub_year:
             base_ts = float(calendar.timegm((pub_year, 1, 1, 0, 0, 0, 0, 0, 0)))
         else:
             base_ts = time.time() - (365 * 24 * 3600)
-
-        doc_store = get_document_store()
-        val_store = get_value_store()
+        if existing_watermark >= base_ts:
+            base_ts = existing_watermark + 1.0
 
         val_store.register_figure_source(
             session_id=session_id,
@@ -134,7 +137,6 @@ def ingest_text(
             document_type=doc_type,
             passage_count=len(passages),
         )
-        doc_store.set_watermark(session_id, -1_000_000_000_000.0)
 
         for i, passage in enumerate(passages):
             doc_store.insert_passage(

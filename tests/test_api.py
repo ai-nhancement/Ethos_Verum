@@ -215,18 +215,12 @@ class TestInputValidation:
 
     # --- export thresholds ---
 
-    def test_export_p1_threshold_has_no_upper_bound(self, client):
-        # ExportRequest has no ge/le on thresholds — documents this gap
-        with patch("api.app._run_export") as m:
-            from api.models import ExportResponse
-            m.return_value = ExportResponse(
-                ok=True, figure=None, p1_count=0, p0_count=0, apy_count=0,
-                ambiguous_count=0, total_count=0,
-                output_dir=None, files_written=[], error=None)
-            r = client.post("/export/ric",
-                            json={"p1_threshold": 2.0, "p0_threshold": 1.5})
-        # Currently accepted — no validation. Test documents this is the behavior.
-        assert r.status_code == 200
+    def test_export_thresholds_reject_out_of_range(self, client):
+        # ExportRequest has ge=0.0, le=1.0 on all threshold fields.
+        # Values outside [0, 1] must be rejected before reaching the handler.
+        r = client.post("/export/ric",
+                        json={"p1_threshold": 2.0, "p0_threshold": 1.5})
+        assert r.status_code == 422
 
 
 # ===========================================================================

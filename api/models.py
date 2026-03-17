@@ -96,10 +96,10 @@ class UniversalProfileResponse(BaseModel):
 class ExportRequest(BaseModel):
     figure:           Optional[str]  = Field(None,
                                              description="Export only this figure (default: all).")
-    p1_threshold:     float = Field(0.55, description="Min resistance for P1 classification.")
-    p0_threshold:     float = Field(0.35, description="Max resistance for P0 classification.")
-    min_observations: int   = Field(1,    description="Min observations per value to include.")
-    min_consistency:  float = Field(0.0,  description="Min consistency score to include.")
+    p1_threshold:     float = Field(0.55, ge=0.0, le=1.0, description="Min resistance for P1 classification.")
+    p0_threshold:     float = Field(0.35, ge=0.0, le=1.0, description="Max resistance for P0 classification.")
+    min_observations: int   = Field(1, ge=1, description="Min observations per value to include.")
+    min_consistency:  float = Field(0.0, ge=0.0, le=1.0, description="Min consistency score to include.")
     dry_run:          bool  = Field(False, description="Return stats only, write no files.")
     output_dir:       str   = Field("output/ric", description="Output directory path.")
 

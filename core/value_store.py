@@ -167,9 +167,17 @@ class ValueStore:
         disambiguation_confidence: float = 1.0,
         doc_type: str = "unknown",
     ) -> str:
-        uid = str(uuid.uuid4())
         try:
             conn = self._conn()
+            existing = conn.execute(
+                """SELECT id FROM value_observations
+                   WHERE session_id=? AND record_id=? AND value_name=?""",
+                (session_id, record_id, value_name),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
+
+            uid = str(uuid.uuid4())
             conn.execute(
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
@@ -180,9 +188,10 @@ class ValueStore:
                  float(disambiguation_confidence), str(doc_type or "unknown")),
             )
             conn.commit()
+            return uid
         except Exception:
             _log.warning("record_observation failed", exc_info=True)
-        return uid
+            return ""
 
     def get_observations(
         self,
@@ -372,13 +381,19 @@ class ValueStore:
                        COALESCE(r.top_value, '')     AS top_value
                    FROM figure_sources fs
                    LEFT JOIN (
-                       SELECT session_id,
-                              SUM(demonstrations) AS total_demos,
-                              COUNT(*)            AS value_count,
-                              MAX(value_name)     AS top_value
-                       FROM value_registry
-                       WHERE session_id LIKE 'figure:%'
-                       GROUP BY session_id
+                       SELECT vr.session_id,
+                              SUM(vr.demonstrations) AS total_demos,
+                              COUNT(*)               AS value_count,
+                              (
+                                  SELECT vr2.value_name
+                                  FROM value_registry vr2
+                                  WHERE vr2.session_id = vr.session_id
+                                  ORDER BY vr2.weight DESC, vr2.demonstrations DESC, vr2.value_name ASC
+                                  LIMIT 1
+                              ) AS top_value
+                       FROM value_registry vr
+                       WHERE vr.session_id LIKE 'figure:%'
+                       GROUP BY vr.session_id
                    ) r ON r.session_id = fs.session_id
                    ORDER BY fs.ingested_at DESC"""
             ).fetchall()
@@ -418,8 +433,11 @@ class ValueStore:
             ).fetchone()[0]
             top = conn.execute(
                 """SELECT value_name, SUM(demonstrations) AS total_demos
-                   FROM value_registry WHERE session_id=''
-                   ORDER BY total_demos DESC LIMIT 5"""
+                   FROM value_registry
+                   WHERE session_id LIKE 'figure:%'
+                   GROUP BY value_name
+                   ORDER BY total_demos DESC, value_name ASC
+                   LIMIT 5"""
             ).fetchall()
             figures = conn.execute(
                 "SELECT COUNT(*) FROM figure_sources"
@@ -450,11 +468,19 @@ class ValueStore:
         resistance: float,
         text_excerpt: str,
     ) -> str:
-        uid = str(uuid.uuid4())
         try:
             conn = self._conn()
+            existing = conn.execute(
+                """SELECT id FROM value_tension
+                   WHERE session_id=? AND record_id=? AND value_held=? AND value_failed=?""",
+                (session_id, record_id, str(value_held), str(value_failed)),
+            ).fetchone()
+            if existing:
+                return str(existing["id"])
+
+            uid = str(uuid.uuid4())
             conn.execute(
-                """INSERT OR IGNORE INTO value_tension
+                """INSERT INTO value_tension
                    (id, session_id, record_id, ts, value_held, value_failed,
                     resistance, text_excerpt)
                    VALUES (?,?,?,?,?,?,?,?)""",
@@ -463,9 +489,10 @@ class ValueStore:
                  float(resistance), str(text_excerpt)[:300]),
             )
             conn.commit()
+            return uid
         except Exception:
             _log.warning("record_tension failed", exc_info=True)
-        return uid
+            return ""
 
     def get_tensions(
         self,
@@ -503,13 +530,25 @@ class ValueStore:
         """Write a pressure context entry and prune to the N most recent."""
         try:
             conn = self._conn()
-            conn.execute(
-                """INSERT OR REPLACE INTO apy_context
-                   (id, session_id, record_id, ts, passage_idx, markers)
-                   VALUES (?,?,?,?,?,?)""",
-                (str(uuid.uuid4()), session_id, record_id, float(ts),
-                 int(passage_idx), str(markers)),
-            )
+            existing = conn.execute(
+                """SELECT id FROM apy_context WHERE session_id=? AND record_id=?""",
+                (session_id, record_id),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """UPDATE apy_context
+                       SET ts=?, passage_idx=?, markers=?
+                       WHERE id=?""",
+                    (float(ts), int(passage_idx), str(markers), str(existing["id"])),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO apy_context
+                       (id, session_id, record_id, ts, passage_idx, markers)
+                       VALUES (?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), session_id, record_id, float(ts),
+                     int(passage_idx), str(markers)),
+                )
             # Prune: keep only the N most recent by passage_idx
             conn.execute(
                 """DELETE FROM apy_context
