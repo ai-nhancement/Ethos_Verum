@@ -7,12 +7,15 @@ Two independent sub-layers:
 
   A. Structural patterns (pure regex, zero deps)
      Detect the context in which values appear — agency, adversity, and
-     resistance markers. A passage where value keywords appear alongside
-     adversity vocabulary ("despite", "at great cost", "refused to yield")
-     is stronger evidence than the same keywords in neutral context.
+     resistance markers. Each of four pattern classes (adversity, agency,
+     resistance, stakes) is scored on a three-tier intensity scale:
 
-     Returns a structural_score in [0.0, 1.0] for each value candidate
-     the passage is tested against.
+       T1 = 0.30  mild / concessive  ("despite", "continued")
+       T2 = 0.65  real cost / active pressure  ("at great risk", "refused")
+       T3 = 1.00  existential / irreversible  ("risking everything", "would not betray")
+
+     structural_score = mean of the four class scores → continuous [0.0, 1.0].
+     "despite" and "risking everything" no longer score identically.
 
   B. Zero-shot entailment (HuggingFace DeBERTa, lazy-load, fail-open)
      Model: MoritzLaurer/deberta-v3-large-zeroshot-v2.0
@@ -37,26 +40,53 @@ from typing import Dict, List, Optional, Tuple
 _log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Sub-layer A — Structural patterns
+# Tier constants
 # ---------------------------------------------------------------------------
 
-# Adversity context markers — close presence of these near a value keyword
-# suggests the value is being demonstrated under real pressure.
-_ADVERSITY_RE = re.compile(
+_T1: float = 0.30   # mild / concessive signal
+_T2: float = 0.65   # real cost / active pressure
+_T3: float = 1.00   # existential / irreversible / moral-betrayal stakes
+
+# ---------------------------------------------------------------------------
+# Sub-layer A — Structural patterns (tiered)
+# ---------------------------------------------------------------------------
+#
+# Each class has three regexes (T1, T2, T3).
+# _class_score() checks T3 first and returns the highest tier that matches.
+# structural_score() = mean of the four class scores.
+#
+# Class scores are value-agnostic — they characterise the CONTEXT, not the
+# value.  The caller uses the aggregate score to boost resistance scoring
+# and disambiguation confidence.
+
+# --- ADVERSITY CLASS -------------------------------------------------------
+# T1: concessive conjunctions — something is being acknowledged but not at
+#     measurable personal cost.
+_ADV_T1 = re.compile(
+    r"\b(?:in\s+spite\s+of|although|even\s+though|notwithstanding|despite)\b",
+    re.IGNORECASE,
+)
+
+# T2: real cost and active external pressure — cost is acknowledged and
+#     somewhat specific, or the opposition is named.
+_ADV_T2 = re.compile(
     r"\b(?:"
-    # Concessive conjunctions / prepositions
-    r"in\s+spite\s+of|although|even\s+though|notwithstanding|despite|"
-    # Cost and risk vocabulary
     r"at\s+(?:great\s+)?(?:personal\s+)?(?:risk|cost|price|peril)|"
-    r"risking\s+(?:everything|my\s+life|his\s+life|her\s+life|their\s+lives|"
-    r"my\s+career|my\s+reputation|his\s+career|her\s+career)|"
     r"knowing\s+(?:the\s+)?(?:cost|risk|danger|consequences?)|"
     r"at\s+the\s+expense\s+of|"
-    # Opposition and pressure
     r"against\s+(?:all\s+)?(?:opposition|resistance|advice|orders|the\s+odds)|"
     r"under\s+(?:pressure|threat|fire|attack|duress|siege|interrogation)|"
-    r"in\s+the\s+face\s+of|"
-    # Sacrifice vocabulary
+    r"in\s+the\s+face\s+of"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# T3: existential and irreversible cost — life, career, freedom named
+#     explicitly as what was put at risk or sacrificed.
+_ADV_T3 = re.compile(
+    r"\b(?:"
+    r"risking\s+(?:everything|my\s+life|his\s+life|her\s+life|their\s+lives|"
+    r"my\s+career|my\s+reputation|his\s+career|her\s+career)|"
     r"sacrific(?:ing|ed)\s+(?:my|his|her|their|everything)|"
     r"gave\s+(?:up\s+)?(?:everything|my\s+life|his\s+life|her\s+life)|"
     r"laid\s+down\s+(?:his|her|their|my)\s+life"
@@ -64,72 +94,163 @@ _ADVERSITY_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Agency markers — first-person + active verb in adversity context
-# Pattern: (I|we) [optionally: still/yet] [action_verb]
-_AGENCY_RE = re.compile(
+# --- AGENCY CLASS ----------------------------------------------------------
+# Requires first-person subject (I|we).  Third-person biographical text is
+# handled separately by doc_type (action) weighting.
+
+# T1: passive continuation — the subject kept going without a named choice.
+_AGC_T1 = re.compile(
     r"\b(?:I|we)\s+(?:still\s+|yet\s+|nevertheless\s+|nonetheless\s+)?"
-    r"(?:refused?|chose|stood|held|pressed\s+on|"
-    r"carried\s+on|kept\s+going|continued|persisted?|remained?|stayed?|"
-    r"marched\s+on|rose|rebuilt?|recovered?|endured?|persevered?|"
-    r"did\s+not|would\s+not|could\s+not\s+(?:abandon|betray|yield|flee|lie|deceive))\b",
+    r"(?:continued|remained?|stayed?|kept\s+going|marched\s+on)\b",
     re.IGNORECASE,
 )
 
-# Resistance-to-failure markers — explicit refusal of value-failure actions
-_RESISTANCE_RE = re.compile(
+# T2: active resistance verbs — the subject made an explicit choice to hold.
+_AGC_T2 = re.compile(
+    r"\b(?:I|we)\s+(?:still\s+|yet\s+|nevertheless\s+|nonetheless\s+)?"
+    r"(?:refused?|chose|stood|held|pressed\s+on|carried\s+on|"
+    r"persisted?|rose|rebuilt?|recovered?|endured?|persevered?)\b",
+    re.IGNORECASE,
+)
+
+# T3: explicit refusal of a named failure act — the subject is described as
+#     refusing to do something morally or situationally specific.
+_AGC_T3 = re.compile(
+    r"\b(?:I|we)\s+(?:still\s+|yet\s+|nevertheless\s+|nonetheless\s+)?"
+    r"(?:did\s+not|would\s+not|"
+    r"could\s+not\s+(?:abandon|betray|yield|flee|lie|deceive))\b",
+    re.IGNORECASE,
+)
+
+# --- RESISTANCE CLASS ------------------------------------------------------
+# T1: did-not / never constructions — the value held but without an active
+#     named refusal.
+_RES_T1 = re.compile(
     r"\b(?:"
-    r"refused?\s+to\s+(?:yield|capitulate|surrender|abandon|betray|lie|deceive|"
-    r"flee|retreat|give\s+up|give\s+in|back\s+down|stand\s+aside)|"
-    r"would\s+not\s+(?:yield|capitulate|surrender|abandon|betray|lie|deceive|"
-    r"flee|retreat|give\s+up|give\s+in|back\s+down|stand\s+aside|be\s+silenced)|"
-    r"did\s+not\s+(?:yield|capitulate|abandon|betray|flee|retreat|falter|waver)|"
-    r"never\s+(?:yielded|capitulated|abandoned|betrayed|fled|retreated|faltered|wavered)|"
+    r"did\s+not\s+(?:yield|capitulate|abandon|flee|retreat|falter|waver)|"
+    r"never\s+(?:yielded|capitulated|fled|retreated|faltered|wavered)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# T2: explicit refused/would-not for tactical/positional failure.
+_RES_T2 = re.compile(
+    r"\b(?:"
+    r"refused?\s+to\s+(?:yield|capitulate|surrender|give\s+up|give\s+in|"
+    r"back\s+down|stand\s+aside|flee|retreat)|"
+    r"would\s+not\s+(?:yield|capitulate|surrender|give\s+up|give\s+in|"
+    r"back\s+down|stand\s+aside|be\s+silenced)|"
+    r"never\s+(?:surrendered|capitulated)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# T3: refused to betray / abandon / deceive — moral and relational stakes.
+#     These involve harm to others or a direct violation of a value, not just
+#     personal tactical retreat.
+_RES_T3 = re.compile(
+    r"\b(?:"
+    r"refused?\s+to\s+(?:abandon|betray|lie|deceive)|"
+    r"would\s+not\s+(?:abandon|betray|lie|deceive)|"
+    r"did\s+not\s+(?:betray|abandon)|"
+    r"never\s+(?:betrayed|abandoned)|"
     r"could\s+not\s+(?:abandon|betray|leave|forsake)\s+(?:them|him|her|the)"
     r")\b",
     re.IGNORECASE,
 )
 
-# Counterfactual pressure markers — explicit description of what was at stake
-_STAKES_RE = re.compile(
+# --- STAKES CLASS ----------------------------------------------------------
+# T1: abstract stakes — something of personal value is noted as being at
+#     risk, but without specificity about the threat.
+_STK_T1 = re.compile(
     r"\b(?:"
     r"(?:my|his|her|their|our)\s+(?:life|career|freedom|reputation|safety|"
     r"livelihood|position|future|everything)\s+(?:was\s+at\s+stake|"
-    r"depended\s+on\s+it|hung\s+in\s+the\s+balance)|"
-    r"(?:threatened|warned|ordered)\s+(?:me|him|her|them|us)\s+to|"
+    r"depended\s+on\s+it|hung\s+in\s+the\s+balance)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# T2: named external agent applying pressure — someone else is explicitly
+#     issuing a threat or demand.
+_STK_T2 = re.compile(
+    r"\b(?:"
+    r"(?:threatened|warned|ordered)\s+(?:me|him|her|them|us)\s+to"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# T3: physical violence, death, imprisonment, or execution named — the cost
+#     of resistance is irreversible or lethal.
+_STK_T3 = re.compile(
+    r"\b(?:"
     r"(?:threatened|faced|risked)\s+(?:death|imprisonment|exile|ruin|"
     r"execution|persecution)|"
+    r"(?:threatened|warned)\s+(?:me|him|her|them|us)\s+with\s+(?:death|"
+    r"imprisonment|exile|ruin|execution|persecution)|"
     r"at\s+(?:gunpoint|knifepoint|sword(?:point)?|threat\s+of\s+death)"
     r")\b",
     re.IGNORECASE,
 )
 
 
+# ---------------------------------------------------------------------------
+# Class-score helper
+# ---------------------------------------------------------------------------
+
+def _class_score(
+    text: str,
+    t1: re.Pattern,
+    t2: re.Pattern,
+    t3: re.Pattern,
+) -> float:
+    """
+    Return the highest tier score that matches *text* for one adversity class.
+    Checks T3 first; returns 0.0 if nothing matches.
+    """
+    if t3.search(text):
+        return _T3
+    if t2.search(text):
+        return _T2
+    if t1.search(text):
+        return _T1
+    return 0.0
+
+
 def structural_score(text: str) -> float:
     """
     Compute a structural adversity score for a passage.
 
-    Returns a value in [0.0, 1.0]:
-      0.0  — no structural signals detected
-      0.3  — one signal type present
-      0.5  — two signal types present
-      0.8  — three signal types present
-      1.0  — all four signal types present (max)
+    Returns a continuous value in [0.0, 1.0] — the mean of four independent
+    class scores:
 
-    Higher score = stronger structural evidence the passage describes
-    a value being demonstrated under real adversity.
+        adversity  context (T1: despite | T2: at great cost | T3: risking everything)
+        agency     first-person choice (T1: continued | T2: refused | T3: would not betray)
+        resistance refusal of failure (T1: did not yield | T2: refused to surrender | T3: refused to betray)
+        stakes     counterfactual cost (T1: life at stake | T2: threatened to | T3: at gunpoint)
 
-    This is value-agnostic — it characterizes the CONTEXT, not the value.
-    Used to boost resistance scoring and disambiguation confidence.
+    Each class returns its highest-tier match:
+        T1 = 0.30   mild / concessive
+        T2 = 0.65   real cost / active pressure
+        T3 = 1.00   existential / irreversible
+
+    Notable calibration points:
+        All four classes absent              → 0.0
+        One class fires at T1 only          → 0.075
+        One class fires at T3 only          → 0.25
+        All four classes fire at T1         → 0.30
+        All four classes fire at T2         → 0.65
+        All four classes fire at T3         → 1.00
+
+    Higher score = stronger structural evidence that the passage describes
+    a value being demonstrated under real adversity.  This is value-agnostic.
     """
     try:
-        has_adversity  = bool(_ADVERSITY_RE.search(text))
-        has_agency     = bool(_AGENCY_RE.search(text))
-        has_resistance = bool(_RESISTANCE_RE.search(text))
-        has_stakes     = bool(_STAKES_RE.search(text))
-
-        hits = sum([has_adversity, has_agency, has_resistance, has_stakes])
-        score_map = {0: 0.0, 1: 0.3, 2: 0.5, 3: 0.8, 4: 1.0}
-        return score_map[hits]
+        adv = _class_score(text, _ADV_T1, _ADV_T2, _ADV_T3)
+        agc = _class_score(text, _AGC_T1, _AGC_T2, _AGC_T3)
+        res = _class_score(text, _RES_T1, _RES_T2, _RES_T3)
+        stk = _class_score(text, _STK_T1, _STK_T2, _STK_T3)
+        return round((adv + agc + res + stk) / 4.0, 4)
     except Exception:
         return 0.0
 
@@ -265,7 +386,7 @@ def layer3_signals(
       (structural_score, new_zeroshot_signals, zs_agreement_scores)
 
     structural_score:
-        float in [0.0, 1.0] — value-agnostic adversity context strength.
+        Continuous float in [0.0, 1.0] — mean of four tiered class scores.
         Caller uses this to boost resistance/confidence on all L1/L2 signals.
 
     new_zeroshot_signals:
