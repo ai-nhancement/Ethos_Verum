@@ -135,20 +135,16 @@ class ValueStore:
         """)
         conn.commit()
         # Migration: add column to existing DBs (SQLite ignores if already present via try/except)
-        try:
-            conn.execute(
-                "ALTER TABLE value_observations ADD COLUMN disambiguation_confidence REAL NOT NULL DEFAULT 1.0"
-            )
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
-        try:
-            conn.execute(
-                "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'"
-            )
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
+        for _migration in (
+            "ALTER TABLE value_observations ADD COLUMN disambiguation_confidence REAL NOT NULL DEFAULT 1.0",
+            "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'",
+            "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
+        ):
+            try:
+                conn.execute(_migration)
+                conn.commit()
+            except Exception:
+                pass  # Column already exists
 
     # ------------------------------------------------------------------
     # Observations (append-only)
@@ -166,7 +162,15 @@ class ValueStore:
         resistance: float,
         disambiguation_confidence: float = 1.0,
         doc_type: str = "unknown",
+        value_polarity: int = 0,
     ) -> str:
+        """
+        Record a single value observation.
+
+        value_polarity: +1 = constructive, -1 = destructive, 0 = ambiguous.
+          Polarity is independent of resistance — it captures the moral
+          direction of the value expression, not the cost of holding it.
+        """
         try:
             conn = self._conn()
             existing = conn.execute(
@@ -181,11 +185,13 @@ class ValueStore:
             conn.execute(
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
-                    text_excerpt, significance, resistance, disambiguation_confidence, doc_type)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    text_excerpt, significance, resistance, disambiguation_confidence,
+                    doc_type, value_polarity)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, session_id, turn_id, record_id, ts, value_name,
                  text_excerpt[:200], float(significance), float(resistance),
-                 float(disambiguation_confidence), str(doc_type or "unknown")),
+                 float(disambiguation_confidence), str(doc_type or "unknown"),
+                 int(value_polarity)),
             )
             conn.commit()
             return uid

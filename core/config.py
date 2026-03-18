@@ -81,6 +81,11 @@ class Config:
     mft_standalone_threshold: float = 0.80 # min score to create a new standalone signal
     mft_standalone_weight: float = 0.50    # weight applied to score for standalone confidence
 
+    # Polarity detection (two-axis value measurement)
+    # Tier 1 + 2 are always active. Tier 3 (zero-shot) is gated by these flags.
+    polarity_zeroshot_enabled: bool = False  # enable Tier 3 zero-shot polarity check
+    polarity_zeroshot_threshold: float = 0.55  # min entailment for negative polarity
+
 
 _default: Config | None = None
 

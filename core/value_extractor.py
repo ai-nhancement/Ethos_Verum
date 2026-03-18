@@ -31,6 +31,7 @@ _log = logging.getLogger(__name__)
 
 from core.config import get_config
 from core.document_store import get_document_store
+from core.polarity_layer import detect_polarity
 from core.resistance import compute_resistance
 from core.value_store import get_value_store
 
@@ -840,20 +841,44 @@ def _run_extraction(session_id: str) -> int:
         # Scale: resistance × (0.85 + 0.15 × struct_score) → [0.85r, 1.00r]
         struct_resistance_factor = round(0.85 + 0.15 * struct_score, 4)
 
+        # Build per-value lexicon vice/virtue score maps for polarity detection.
+        # These are used by Tier 2 of detect_polarity() to confirm or override
+        # the target-word proximity result.
+        _lex_vice_scores:    Dict[str, float] = {}
+        _lex_virtue_scores:  Dict[str, float] = {}
+        for _ls in lex_signals:
+            _vn   = _ls.get("value_name", "")
+            _conf = float(_ls.get("disambiguation_confidence", 0.0))
+            if _ls.get("lexicon_polarity") == "vice":
+                _lex_vice_scores[_vn]   = max(_lex_vice_scores.get(_vn, 0.0), _conf)
+            elif _ls.get("lexicon_polarity") == "virtue":
+                _lex_virtue_scores[_vn] = max(_lex_virtue_scores.get(_vn, 0.0), _conf)
+
         if resistance >= cfg.min_resistance_threshold:
             for sig in merged:
                 sig_resistance = round(resistance * struct_resistance_factor, 4)
+                vname = sig["value_name"]
+                # Per-signal polarity: independent of resistance, measures moral direction
+                polarity, _pol_conf = detect_polarity(
+                    text=text,
+                    match_idx=sig.get("match_idx", 0),
+                    value_name=vname,
+                    lexicon_vice_score=_lex_vice_scores.get(vname, 0.0),
+                    lexicon_virtue_score=_lex_virtue_scores.get(vname, 0.0),
+                    cfg=cfg,
+                )
                 val_store.record_observation(
                     session_id=session_id,
                     turn_id=record_id,
                     record_id=record_id,
                     ts=ts,
-                    value_name=sig["value_name"],
+                    value_name=vname,
                     text_excerpt=sig["text_excerpt"],
                     significance=significance,
                     resistance=sig_resistance,
                     disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
                     doc_type=doc_type,
+                    value_polarity=polarity,
                 )
                 val_store.upsert_registry(
                     session_id=session_id,
@@ -932,6 +957,7 @@ def extract_value_signals(
                 "text_excerpt": excerpt,
                 "significance": significance,
                 "disambiguation_confidence": conf,
+                "match_idx": idx,          # character position for polarity window
             })
             seen_values.add(value_name)
             break
