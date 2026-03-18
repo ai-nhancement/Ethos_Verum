@@ -421,6 +421,32 @@ def _lexicon_signals(
 
 
 # ---------------------------------------------------------------------------
+# Phrase layer helper — compositional verb + vice-word detection
+# ---------------------------------------------------------------------------
+
+def _phrase_signals(
+    text: str,
+    significance: float,
+    doc_type: str,
+    cfg,
+) -> tuple:
+    """
+    Run phrase composition detection on a passage.
+
+    Returns (signals, consumed_tokens) where:
+      signals          — phrase-level signal dicts with 'polarity_hint' key
+      consumed_tokens  — lowercase token strings consumed by phrase matches
+    """
+    if not cfg.lexicon_enabled:
+        return [], set()
+    try:
+        from core.phrase_layer import phrase_signals
+        return phrase_signals(text, significance, doc_type)
+    except Exception:
+        return [], set()
+
+
+# ---------------------------------------------------------------------------
 # Layer 3 helper
 # ---------------------------------------------------------------------------
 
@@ -732,6 +758,10 @@ def _run_extraction(session_id: str) -> int:
         if cfg.lexicon_enabled:
             lex_signals = _lexicon_signals(text, significance, doc_type, cfg)
 
+        # Phrase layer (Layer 1c) — compositional verb + vice-word detection
+        # Emits signals with pre-determined polarity_hint; bypasses Tier 1/2 detection.
+        _p_sigs, _consumed_vice = _phrase_signals(text, significance, doc_type, cfg)
+
         # Semantic signals (Layer 2) — only if semantic layer available
         sem_signals = _semantic_signals(text, significance, cfg)
 
@@ -753,6 +783,12 @@ def _run_extraction(session_id: str) -> int:
             elif lex["disambiguation_confidence"] >= cfg.lexicon_standalone_min_conf:
                 sig = {k: v for k, v in lex.items() if k != "lexicon_polarity"}
                 merged.append(sig)
+
+        # Phrase signals (Layer 1c): add standalone phrase-level detections.
+        # Each has a pre-determined polarity_hint; polarity detection is skipped
+        # at recording time for these signals.
+        for ps in _p_sigs:
+            merged.append({k: v for k, v in ps.items()})
 
         # Merge L1+L1b + L2 (semantic): boost when both agree.
         merged_values = {s["value_name"] for s in merged}
@@ -858,18 +894,24 @@ def _run_extraction(session_id: str) -> int:
             for sig in merged:
                 sig_resistance = round(resistance * struct_resistance_factor, 4)
                 vname = sig["value_name"]
-                # Per-signal polarity: independent of resistance, measures moral direction
-                # match_idx=None for non-keyword signals (semantic, zero-shot, MFT)
-                # causes polarity Tier 1 to search the full passage rather than
-                # a window anchored at position 0, which would be meaningless.
-                polarity, pol_conf = detect_polarity(
-                    text=text,
-                    match_idx=sig.get("match_idx"),  # None when key absent
-                    value_name=vname,
-                    lexicon_vice_score=_lex_vice_scores.get(vname, 0.0),
-                    lexicon_virtue_score=_lex_virtue_scores.get(vname, 0.0),
-                    cfg=cfg,
-                )
+                # Per-signal polarity: phrase-layer signals carry a pre-determined
+                # polarity_hint that bypasses Tier 1/2 detection.  All other signals
+                # run the full detect_polarity() path.
+                if "polarity_hint" in sig:
+                    polarity  = sig["polarity_hint"]
+                    pol_conf  = sig["disambiguation_confidence"]
+                else:
+                    # match_idx=None for non-keyword signals (semantic, zero-shot, MFT)
+                    # causes polarity Tier 1 to search the full passage rather than
+                    # a window anchored at position 0, which would be meaningless.
+                    polarity, pol_conf = detect_polarity(
+                        text=text,
+                        match_idx=sig.get("match_idx"),  # None when key absent
+                        value_name=vname,
+                        lexicon_vice_score=_lex_vice_scores.get(vname, 0.0),
+                        lexicon_virtue_score=_lex_virtue_scores.get(vname, 0.0),
+                        cfg=cfg,
+                    )
                 val_store.record_observation(
                     session_id=session_id,
                     turn_id=record_id,
