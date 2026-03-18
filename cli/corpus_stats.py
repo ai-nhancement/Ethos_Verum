@@ -90,6 +90,31 @@ def print_report(report: dict, min_figures: int = 2) -> None:
             if top:
                 print(f"    top values: {top}")
 
+    # ── Corpus quality gate ─────────────────────────────────────────────────
+    cq = report.get("corpus_quality", [])
+    if cq:
+        print("\n──────────────────────────────────────────────────")
+        print("  CORPUS QUALITY GATE")
+        print("──────────────────────────────────────────────────")
+        col_w = max((len(q["figure_name"]) for q in cq), default=10) + 2
+        print(f"  {'Figure':<{col_w}}  {'Docs':>4}  {'Types':>5}  {'Tier':<12}  {'Export'}")
+        print(f"  {'-'*col_w}  {'-'*4}  {'-'*5}  {'-'*12}  {'-'*6}")
+        for q in cq:
+            fig    = q["figure_name"]
+            docs   = q["document_count"]
+            types  = q["distinct_doc_type_count"]
+            tier   = q["confidence_tier"]
+            ok     = "YES" if q["approved_for_export"] else "NO"
+            marker = "  " if q["approved_for_export"] else "! "
+            print(f"  {marker}{fig:<{col_w-2}}  {docs:>4}  {types:>5}  {tier:<12}  {ok}")
+            for note in q["notes"]:
+                print(f"    -> {note}")
+        n_approved = sum(1 for q in cq if q["approved_for_export"])
+        n_blocked  = len(cq) - n_approved
+        print(f"\n  {n_approved} approved  {n_blocked} need more documents")
+        if n_blocked:
+            print("  Run: python -m cli.ingest --figure <name> --doc-type <type> --doc-title <title> ...")
+
     # ── Value distribution ──────────────────────────────────────────────────
     if vd:
         print("\n──────────────────────────────────────────────────")

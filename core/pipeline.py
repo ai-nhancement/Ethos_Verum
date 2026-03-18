@@ -68,6 +68,7 @@ def ingest_text(
     is_translation: Optional[bool] = None,
     significance: Optional[float] = None,
     run_extract: bool = True,
+    doc_title: str = "",
 ) -> IngestResult:
     """
     Ingest raw text for a historical figure.
@@ -146,6 +147,12 @@ def ingest_text(
             session_id=session_id,
             figure_name=figure_name,
             document_type=doc_type,
+            passage_count=len(passages),
+        )
+        val_store.register_figure_document(
+            figure_name=figure_name,
+            doc_type=doc_type,
+            doc_title=doc_title,
             passage_count=len(passages),
         )
 

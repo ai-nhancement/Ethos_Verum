@@ -358,6 +358,130 @@ def get_significance_distribution(val_db_path: str) -> Dict:
         _safe_close(vconn)
 
 
+# ---------------------------------------------------------------------------
+# Corpus quality gate
+# ---------------------------------------------------------------------------
+
+# Thresholds — researcher-configurable
+CORPUS_MIN_DOCS_CONFIDENT    = 3
+CORPUS_MIN_TYPES_CONFIDENT   = 2
+CORPUS_MIN_DOCS_PARTIAL      = 2
+
+
+def get_figure_corpus_quality(val_db_path: str, figure_name: str) -> Dict:
+    """
+    Return a corpus quality assessment for a single figure.
+
+    Tiers:
+      "preliminary"  — 1 document (single source, low confidence)
+      "partial"      — 2 documents (better, but potentially skewed)
+      "confident"    — 3+ documents across ≥2 doc_types (approved for export)
+
+    Return dict:
+      {
+        figure_name, document_count, doc_types, distinct_doc_type_count,
+        confidence_tier, approved_for_export,
+        documents: [{doc_title, doc_type, passage_count, ingested_at}],
+        notes: [str],   # human-readable warnings
+      }
+    """
+    try:
+        vconn = _open(val_db_path)
+        rows = vconn.execute(
+            """SELECT doc_title, doc_type, passage_count, ingested_at
+               FROM figure_documents
+               WHERE figure_name=?
+               ORDER BY ingested_at""",
+            (figure_name,),
+        ).fetchall()
+
+        doc_count        = len(rows)
+        doc_types        = sorted({r["doc_type"] for r in rows})
+        distinct_types   = len(doc_types)
+        documents        = [dict(r) for r in rows]
+
+        if doc_count >= CORPUS_MIN_DOCS_CONFIDENT and distinct_types >= CORPUS_MIN_TYPES_CONFIDENT:
+            tier     = "confident"
+            approved = True
+        elif doc_count >= CORPUS_MIN_DOCS_PARTIAL:
+            tier     = "partial"
+            approved = False
+        else:
+            tier     = "preliminary"
+            approved = False
+
+        notes: list = []
+        if doc_count == 0:
+            notes.append("No documents tracked. Re-ingest with --doc-title to enable tracking.")
+        elif tier == "preliminary":
+            need_docs  = CORPUS_MIN_DOCS_CONFIDENT - doc_count
+            need_types = max(0, CORPUS_MIN_TYPES_CONFIDENT - distinct_types)
+            notes.append(
+                f"Need {need_docs} more document(s)"
+                + (f" and {need_types} more doc-type(s)" if need_types else "")
+                + " before export is approved."
+            )
+        elif tier == "partial":
+            need_docs  = CORPUS_MIN_DOCS_CONFIDENT - doc_count
+            need_types = max(0, CORPUS_MIN_TYPES_CONFIDENT - distinct_types)
+            parts = []
+            if need_docs > 0:
+                parts.append(f"{need_docs} more document(s)")
+            if need_types > 0:
+                parts.append(f"{need_types} more doc-type(s)")
+            if parts:
+                notes.append("Need " + " and ".join(parts) + " before export is approved.")
+
+        return {
+            "figure_name":           figure_name,
+            "document_count":        doc_count,
+            "doc_types":             doc_types,
+            "distinct_doc_type_count": distinct_types,
+            "confidence_tier":       tier,
+            "approved_for_export":   approved,
+            "documents":             documents,
+            "notes":                 notes,
+        }
+    except Exception:
+        _log.warning("get_figure_corpus_quality failed for %r", figure_name, exc_info=True)
+        return {
+            "figure_name": figure_name, "document_count": 0, "doc_types": [],
+            "distinct_doc_type_count": 0, "confidence_tier": "preliminary",
+            "approved_for_export": False, "documents": [], "notes": [],
+        }
+    finally:
+        _safe_close(vconn)
+
+
+def get_all_corpus_quality(val_db_path: str) -> List[Dict]:
+    """
+    Return corpus quality for every figure that has any ingested documents,
+    sorted by document_count DESC.
+    """
+    try:
+        vconn = _open(val_db_path)
+        figures = [
+            r[0] for r in vconn.execute(
+                "SELECT DISTINCT figure_name FROM figure_documents ORDER BY figure_name"
+            ).fetchall()
+        ]
+        # Also include figures in figure_sources with no document rows (legacy ingests)
+        legacy = [
+            r[0] for r in vconn.execute(
+                """SELECT DISTINCT figure_name FROM figure_sources
+                   WHERE figure_name NOT IN (
+                       SELECT DISTINCT figure_name FROM figure_documents
+                   )"""
+            ).fetchall()
+        ]
+        _safe_close(vconn)
+        results = [get_figure_corpus_quality(val_db_path, f) for f in figures + legacy]
+        return sorted(results, key=lambda r: -r["document_count"])
+    except Exception:
+        _log.warning("get_all_corpus_quality failed", exc_info=True)
+        return []
+
+
 def get_full_report(doc_db_path: str, val_db_path: str) -> Dict:
     """
     Return all corpus statistics in one call. Used by CLI and API.
@@ -365,6 +489,7 @@ def get_full_report(doc_db_path: str, val_db_path: str) -> Dict:
     return {
         "overview":               get_overview(doc_db_path, val_db_path),
         "figures":                get_figure_summaries(doc_db_path, val_db_path),
+        "corpus_quality":         get_all_corpus_quality(val_db_path),
         "value_distribution":     get_value_distribution(val_db_path),
         "resistance":             get_resistance_distribution(val_db_path),
         "significance":           get_significance_distribution(val_db_path),

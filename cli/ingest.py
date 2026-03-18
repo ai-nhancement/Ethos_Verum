@@ -98,6 +98,7 @@ def ingest(
     is_translation: bool | None = None,
     dry_run: bool = False,
     extract: bool = True,
+    doc_title: str = "",
 ) -> int:
     """
     Ingest passages from source_file for figure_name.
@@ -139,6 +140,7 @@ def ingest(
         is_translation=is_translation,
         significance=significance,
         run_extract=extract,
+        doc_title=doc_title,
     )
 
     if not result.ok:
@@ -202,6 +204,8 @@ def main() -> int:
                         help="Declare this document is a translation (sets source_authenticity=0.85)")
     parser.add_argument("--significance", type=float, default=None,
                         help="Significance score for all passages (default: auto from doc-type)")
+    parser.add_argument("--doc-title", default="",
+                        help="Document title for corpus tracking (e.g. 'Meditations', 'Letter to Atticus')")
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview segmentation only — no DB writes")
     parser.add_argument("--no-extract", action="store_true",
@@ -217,6 +221,7 @@ def main() -> int:
         is_translation=True if args.translation else None,
         dry_run=args.dry_run,
         extract=not args.no_extract,
+        doc_title=args.doc_title,
     )
 
     if not args.dry_run and count > 0:

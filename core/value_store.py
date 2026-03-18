@@ -109,6 +109,17 @@ class ValueStore:
                 passage_count INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS figure_documents (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                figure_name   TEXT    NOT NULL,
+                doc_title     TEXT    NOT NULL DEFAULT '',
+                doc_type      TEXT    NOT NULL DEFAULT 'unknown',
+                passage_count INTEGER NOT NULL DEFAULT 0,
+                ingested_at   REAL    NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_figdocs_figure
+                ON figure_documents(figure_name);
+
             CREATE TABLE IF NOT EXISTS value_tension (
                 id           TEXT PRIMARY KEY,
                 session_id   TEXT NOT NULL DEFAULT '',
@@ -360,6 +371,29 @@ class ValueStore:
             conn.commit()
         except Exception:
             _log.warning("register_figure_source failed", exc_info=True)
+
+    def register_figure_document(
+        self,
+        figure_name: str,
+        doc_type: str,
+        doc_title: str = "",
+        passage_count: int = 0,
+    ) -> None:
+        """
+        Record one ingested document for a figure.  Each call = one document.
+        doc_title is optional metadata; it does not deduplicate rows.
+        """
+        try:
+            conn = self._conn()
+            conn.execute(
+                """INSERT INTO figure_documents
+                   (figure_name, doc_title, doc_type, passage_count, ingested_at)
+                   VALUES (?,?,?,?,?)""",
+                (figure_name, doc_title, doc_type, passage_count, time.time()),
+            )
+            conn.commit()
+        except Exception:
+            _log.warning("register_figure_document failed", exc_info=True)
 
     def get_figure_source(self, session_id: str) -> Dict:
         try:

@@ -582,6 +582,8 @@ def export(
     value_tension: bool = False,
     contrastive_pairs: bool = False,
     doc_db_path: str = _DOCS_DB,
+    require_corpus_quality: bool = True,
+    force: bool = False,
 ) -> int:
     _log.info("Reading observations from %s", db_path)
     observations = _read_figure_observations(db_path, figure_filter)
@@ -589,6 +591,50 @@ def export(
     if not observations:
         _log.warning("No historical figure observations found in %s", db_path)
         return 0
+
+    # ------------------------------------------------------------------
+    # Corpus quality gate
+    # ------------------------------------------------------------------
+    if require_corpus_quality and not force:
+        from core.corpus import get_figure_corpus_quality
+        figures_in_obs = {obs["figure_name"] for obs in observations if obs.get("figure_name")}
+        blocked: list = []
+        warned: list = []
+        for fig in sorted(figures_in_obs):
+            q = get_figure_corpus_quality(db_path, fig)
+            tier = q["confidence_tier"]
+            docs = q["document_count"]
+            types = q["distinct_doc_type_count"]
+            if tier == "preliminary" and docs > 0:
+                blocked.append(fig)
+                _log.warning(
+                    "BLOCKED  %s: %d doc(s), %d type(s) — tier='%s'. "
+                    "Need 3+ docs across 2+ types. Use --force to override.",
+                    fig, docs, types, tier,
+                )
+            elif tier == "partial":
+                warned.append(fig)
+                _log.warning(
+                    "WARNING  %s: %d doc(s), %d type(s) — tier='%s'. "
+                    "Add %s more document(s). Proceeding with low confidence.",
+                    fig, docs, types, tier,
+                    q["notes"][0] if q["notes"] else "",
+                )
+            elif tier == "confident":
+                _log.info(
+                    "OK       %s: %d doc(s) across %d types — confident",
+                    fig, docs, types,
+                )
+            # docs==0 means legacy ingest (no figure_documents rows) — allow through
+        if blocked:
+            _log.error(
+                "%d figure(s) blocked by corpus quality gate: %s. "
+                "Re-ingest additional documents or use --force to bypass.",
+                len(blocked), ", ".join(blocked),
+            )
+            observations = [o for o in observations if o.get("figure_name") not in blocked]
+            if not observations:
+                return 0
 
     _log.info("Found %d raw observations (P1>=%.2f P0<%.2f consistency>=%.2f)",
               len(observations), p1_threshold, p0_threshold, min_consistency)
@@ -598,6 +644,17 @@ def export(
         observations, p1_threshold, p0_threshold, min_observations, min_consistency,
         apy_context=apy_ctx,
     )
+
+    # Annotate each record with corpus_confidence from the quality gate
+    from core.corpus import get_figure_corpus_quality
+    _quality_cache: Dict[str, str] = {}
+    for rec in records:
+        fig = rec.get("figure", "")
+        if fig not in _quality_cache:
+            q = get_figure_corpus_quality(db_path, fig)
+            _quality_cache[fig] = q["confidence_tier"]
+        rec["corpus_confidence"] = _quality_cache[fig]
+
     _print_stats(records, label="Classification results")
 
     positive  = [r for r in records if r["label"] == "P1"]
@@ -770,6 +827,10 @@ def main() -> int:
                         help="Export (pressure, failure) APY contrastive pairs to ric_contrastive_pairs.jsonl")
     parser.add_argument("--doc-db", default=_DOCS_DB,
                         help=f"Path to documents.db for contrastive pair lookup (default {_DOCS_DB})")
+    parser.add_argument("--force", action="store_true",
+                        help="Bypass corpus quality gate and export all figures regardless of document count")
+    parser.add_argument("--no-corpus-gate", action="store_true",
+                        help="Disable corpus quality check entirely (same as --force but suppresses warnings)")
     args = parser.parse_args()
 
     export(
@@ -785,6 +846,8 @@ def main() -> int:
         value_tension=args.value_tension,
         contrastive_pairs=args.contrastive_pairs,
         doc_db_path=args.doc_db,
+        require_corpus_quality=not args.no_corpus_gate,
+        force=args.force,
     )
     return 0
 
