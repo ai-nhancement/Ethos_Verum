@@ -5,24 +5,22 @@ from dataclasses import dataclass, field
 # ---------------------------------------------------------------------------
 # Document type authenticity — single source of truth for both modules.
 #
-# resistance_bonus  : added to base resistance score during extraction
-#                     (core/resistance.py)
+# resistance_bonus  : small nudge added to base resistance score during
+#                     extraction (core/resistance.py). Text content is the
+#                     primary resistance signal; doc_type provides a minor
+#                     authenticity adjustment only.
 # training_weight   : multiplied against significance when building training
 #                     records (cli/export.py)
 # default_significance : used when the caller does not supply a significance
 #                     score at ingest time (cli/ingest.py, api)
-#
-# Relationship: training_weight = 0.8 + resistance_bonus
-# This preserves the authenticity hierarchy in both contexts and keeps
-# speech at a slight penalty (0.90) relative to unknown (1.00).
 # ---------------------------------------------------------------------------
 
 DOC_TYPE_RESISTANCE_BONUS: dict = {
-    "action":  0.40,   # documented real-world behavior — highest authenticity
-    "journal": 0.35,   # private writing, no audience pressure
-    "letter":  0.30,   # directed correspondence
-    "speech":  0.10,   # public address — highest performance pressure
-    "unknown": 0.20,   # default
+    "action":  0.05,   # documented real-world behavior — highest authenticity
+    "journal": 0.04,   # private writing, no audience pressure
+    "letter":  0.03,   # directed correspondence
+    "speech":  0.02,   # public address — highest performance pressure
+    "unknown": 0.02,   # default
 }
 
 DOC_TYPE_TRAINING_WEIGHT: dict = {
