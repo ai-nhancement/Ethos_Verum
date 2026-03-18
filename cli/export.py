@@ -437,6 +437,7 @@ def build_training_records(
             "disambiguation_confidence": round(float(obs.get("disambiguation_confidence", 1.0)), 4),
             "observation_consistency":   round(float(obs.get("observation_consistency", 0.5)), 4),
             "value_polarity":            int(obs.get("value_polarity", 0)),
+            "polarity_confidence":        round(float(obs.get("polarity_confidence", 0.0)), 4),
             "pressure_source_id":        pressure_source_id,
             "pressure_context":          bool(pressure_source_id),
             "deferred_apy_lag_s":        deferred_apy_lag_s,

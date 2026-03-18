@@ -859,9 +859,12 @@ def _run_extraction(session_id: str) -> int:
                 sig_resistance = round(resistance * struct_resistance_factor, 4)
                 vname = sig["value_name"]
                 # Per-signal polarity: independent of resistance, measures moral direction
-                polarity, _pol_conf = detect_polarity(
+                # match_idx=None for non-keyword signals (semantic, zero-shot, MFT)
+                # causes polarity Tier 1 to search the full passage rather than
+                # a window anchored at position 0, which would be meaningless.
+                polarity, pol_conf = detect_polarity(
                     text=text,
-                    match_idx=sig.get("match_idx", 0),
+                    match_idx=sig.get("match_idx"),  # None when key absent
                     value_name=vname,
                     lexicon_vice_score=_lex_vice_scores.get(vname, 0.0),
                     lexicon_virtue_score=_lex_virtue_scores.get(vname, 0.0),
@@ -879,6 +882,7 @@ def _run_extraction(session_id: str) -> int:
                     disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
                     doc_type=doc_type,
                     value_polarity=polarity,
+                    polarity_confidence=pol_conf,
                 )
                 val_store.upsert_registry(
                     session_id=session_id,

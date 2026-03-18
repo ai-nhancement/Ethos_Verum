@@ -119,6 +119,8 @@ class ValueStore:
             );
             CREATE INDEX IF NOT EXISTS idx_figdocs_figure
                 ON figure_documents(figure_name);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_figdocs_titled
+                ON figure_documents(figure_name, doc_title) WHERE doc_title != '';
 
             CREATE TABLE IF NOT EXISTS value_tension (
                 id           TEXT PRIMARY KEY,
@@ -150,6 +152,7 @@ class ValueStore:
             "ALTER TABLE value_observations ADD COLUMN disambiguation_confidence REAL NOT NULL DEFAULT 1.0",
             "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'",
             "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
         ):
             try:
                 conn.execute(_migration)
@@ -174,13 +177,18 @@ class ValueStore:
         disambiguation_confidence: float = 1.0,
         doc_type: str = "unknown",
         value_polarity: int = 0,
+        polarity_confidence: float = 0.0,
     ) -> str:
         """
         Record a single value observation.
 
-        value_polarity: +1 = constructive, -1 = destructive, 0 = ambiguous.
+        value_polarity:    +1 = constructive, -1 = destructive, 0 = ambiguous.
           Polarity is independent of resistance — it captures the moral
           direction of the value expression, not the cost of holding it.
+        polarity_confidence: [0.0, 1.0] — confidence in the polarity detection.
+          A polarity of +1 with confidence 0.12 should be weighted differently
+          from one with confidence 0.85. Stored so downstream consumers can
+          apply their own confidence thresholds.
         """
         try:
             conn = self._conn()
@@ -197,12 +205,12 @@ class ValueStore:
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
                     text_excerpt, significance, resistance, disambiguation_confidence,
-                    doc_type, value_polarity)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    doc_type, value_polarity, polarity_confidence)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, session_id, turn_id, record_id, ts, value_name,
                  text_excerpt[:200], float(significance), float(resistance),
                  float(disambiguation_confidence), str(doc_type or "unknown"),
-                 int(value_polarity)),
+                 int(value_polarity), float(max(0.0, min(1.0, polarity_confidence)))),
             )
             conn.commit()
             return uid
@@ -381,10 +389,31 @@ class ValueStore:
     ) -> None:
         """
         Record one ingested document for a figure.  Each call = one document.
-        doc_title is optional metadata; it does not deduplicate rows.
+
+        When doc_title is provided, deduplication is enforced: if a document
+        with the same (figure_name, doc_title) already exists, the call is
+        a no-op and a WARNING is logged.  This prevents re-ingesting the same
+        source from inflating the corpus document count and falsely achieving
+        the "confident" quality tier.
+
+        When doc_title is empty, no deduplication is applied (the document is
+        anonymous and cannot be identified as a duplicate).
         """
         try:
             conn = self._conn()
+            if doc_title:
+                existing = conn.execute(
+                    "SELECT id FROM figure_documents WHERE figure_name=? AND doc_title=?",
+                    (figure_name, doc_title),
+                ).fetchone()
+                if existing:
+                    _log.warning(
+                        "register_figure_document: document '%s' for '%s' was already "
+                        "ingested (id=%s). Skipping to prevent duplicate corpus counting. "
+                        "If this is genuinely a new document, use a distinct --doc-title.",
+                        doc_title, figure_name, existing["id"],
+                    )
+                    return
             conn.execute(
                 """INSERT INTO figure_documents
                    (figure_name, doc_title, doc_type, passage_count, ingested_at)

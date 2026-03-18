@@ -19,9 +19,14 @@ A civil rights leader refusing to denounce protesters at gunpoint:
 Detection architecture (three tiers, applied in order):
 
   Tier 1 — Target lexicon proximity (deterministic):
-    Find positive or negative target words within a window around the
-    value keyword match position. Check for inversion verbs ("fight
-    against", "resist") that reverse the direction. Fast and transparent.
+    Find positive or negative target words near the value keyword position
+    using word-boundary regex matching. Check for inversion verbs ("fight
+    against", "resist") that reverse the direction — but only when the
+    inversion phrase is within _INVERSION_PROX chars of the target word,
+    preventing cross-clause contamination.
+
+    When match_idx is None (semantic/zero-shot/MFT signals without a
+    keyword position), the entire passage is searched rather than a window.
 
   Tier 2 — MFT lexicon vice/virtue signals (deterministic):
     When the passage already fired a moral foundation vice signal
@@ -33,8 +38,8 @@ Detection architecture (three tiers, applied in order):
     When polarity is still ambiguous after Tiers 1 and 2, ask the
     zero-shot classifier whether the value is applied destructively.
     Hypothesis: "The person applies {value} in a harmful or destructive way."
-    Only fires when zeroshot_enabled=True (core.config) and the
-    sentence-transformers + DeBERTa pipeline is available.
+    Only fires when polarity_zeroshot_enabled=True (core.config) AND
+    zeroshot_enabled=True AND the DeBERTa pipeline is available.
 
 Output: (polarity: int, confidence: float)
   polarity:   +1 constructive, -1 destructive, 0 ambiguous
@@ -46,15 +51,21 @@ Never raises. Returns (0, 0.0) on any error.
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Target word lexicons
 # ---------------------------------------------------------------------------
-# These are stem/substring matches (lowercase) applied within a window around
-# the value keyword. Order within each set does not matter.
+# The frozensets are the canonical source of truth and are exported for
+# introspection.  Actual matching uses _POS_TARGET_RE / _NEG_TARGET_RE
+# (pre-compiled word-boundary regexes) to prevent substring false positives:
+#   "fair"   must not match "affair" or "unfair"
+#   "truth"  must not match "untruth"
+#   "equal"  must not match "inequality"
+#   "reason" must not match "treason"
+#   "honest" must not match "dishonest"
+#   "right"  must not match "birthright"
 
-# Words/stems indicating the value is directed toward constructive ends
 POSITIVE_TARGET_WORDS: frozenset = frozenset({
     # Rights, dignity, freedom
     "right", "rights", "freedom", "liberty", "dignity", "equal", "equality",
@@ -73,7 +84,6 @@ POSITIVE_TARGET_WORDS: frozenset = frozenset({
     "life", "survival", "protection", "safety of",
 })
 
-# Words/stems indicating the value is directed toward destructive ends
 NEGATIVE_TARGET_WORDS: frozenset = frozenset({
     # Systems of harm
     "tyranny", "tyrant", "oppression", "persecution", "discrimination",
@@ -92,10 +102,37 @@ NEGATIVE_TARGET_WORDS: frozenset = frozenset({
     "hatred", "hatred of", "contempt for", "hatred toward",
 })
 
-# Inversion patterns: when these appear BETWEEN the value keyword position
-# and a target word, the polarity relationship is reversed.
-# "He fought against tyranny" → inversion + negative target → +1 (positive)
-# "He resisted justice" → inversion + positive target → -1 (destructive)
+# ---------------------------------------------------------------------------
+# Pre-compiled word-boundary regexes for target matching
+# ---------------------------------------------------------------------------
+# Sorted longest-first so multi-word phrases match before their components
+# ("human dignity" before "dignity"; "just cause" before "just").
+
+_pos_sorted = sorted(POSITIVE_TARGET_WORDS, key=len, reverse=True)
+_neg_sorted = sorted(NEGATIVE_TARGET_WORDS, key=len, reverse=True)
+
+_POS_TARGET_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _pos_sorted) + r")\b",
+    re.IGNORECASE,
+)
+_NEG_TARGET_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in _neg_sorted) + r")\b",
+    re.IGNORECASE,
+)
+
+# ---------------------------------------------------------------------------
+# Inversion patterns
+# ---------------------------------------------------------------------------
+# These indicate the subject is directing their value AGAINST (i.e., in
+# opposition to) the nearby target word, reversing its polarity contribution.
+#
+# Rule: only explicit opposition verbs are allowed — bare "against" is
+# intentionally excluded.  "discrimination against minorities" and
+# "violence against women" must NOT fire as inversions.
+#
+# "He fought against tyranny"  → inversion + neg target → +1 (constructive)
+# "He resisted justice"        → inversion + pos target → -1 (destructive)
+#
 _INVERSION_RE = re.compile(
     r"\b(?:"
     r"fight(?:s|ing)?\s+against|fought\s+against|"
@@ -104,19 +141,55 @@ _INVERSION_RE = re.compile(
     r"stand(?:s|ing)?\s+(?:against|up\s+to)|stood\s+(?:against|up\s+to)|"
     r"defying|defied|defi(?:es?)|"
     r"refus(?:ed|es|ing)\s+to\s+(?:serve|enable|allow|support|advance|uphold)|"
-    r"against\b"
+    r"(?:spoke|speak|speaking)\s+(?:out\s+)?against|"
+    r"(?:protest(?:s|ed|ing)?|campaign(?:s|ed|ing)?|march(?:es|ed|ing)?)\s+against"
     r")",
     re.IGNORECASE,
 )
 
-# Window size (characters) around the value match to search for target words
+# Window size (characters) around the value match to search for target words.
+# When match_idx is None, the full passage is searched.
 _TARGET_WINDOW = 120
 
+# Maximum character distance between an inversion phrase and a target word
+# for the inversion to be considered applicable.
+#
+# Calibrated against real cases (start-of-inversion to start-of-target):
+#   "fought against tyranny"                         dist  0-18  (tight)
+#   "Despite all odds he fought against tyranny"     dist ~15   (preamble OK)
+#   "Throughout his long life fought against tyranny"dist ~15   (preamble OK)
+#   "He spoke against injustice, protecting freedom" dist  43   (cross-clause)
+#
+# Threshold 30 passes all tight legitimate cases and rejects cross-clause.
+# Verbose phrases ("protested against the widespread oppression", dist ~50)
+# may not invert via Tier 1, but Tier 2 lexicon can still rescue the signal.
+_INVERSION_PROX = 30
+
 # Tier 1 confidence levels
-_CONF_DIRECT        = 0.80  # target word found, no inversion
-_CONF_INVERTED      = 0.68  # target word found with inversion (more ambiguous)
-_CONF_VICE_ONLY     = 0.60  # no target word, only MFT vice signal
-_CONF_TIER3_BASE    = 0.55  # zero-shot tier 3 base confidence
+_CONF_DIRECT     = 0.80  # target word found, no inversion
+_CONF_INVERTED   = 0.68  # target word found with inversion (more ambiguous)
+_CONF_VICE_ONLY  = 0.60  # no target word, only MFT vice signal
+_CONF_TIER3_BASE = 0.55  # zero-shot tier 3 base confidence
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _inversion_near_target(window: str, target_positions: List[int]) -> bool:
+    """
+    Return True only if an inversion phrase occurs within _INVERSION_PROX
+    characters of at least one target word match position.
+
+    This prevents cross-clause contamination where an unrelated "resisted"
+    or "against" in one clause incorrectly flips a target word in another.
+    """
+    for inv_m in _INVERSION_RE.finditer(window):
+        inv_pos = inv_m.start()
+        for tp in target_positions:
+            if abs(inv_pos - tp) <= _INVERSION_PROX:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -125,24 +198,37 @@ _CONF_TIER3_BASE    = 0.55  # zero-shot tier 3 base confidence
 
 def _tier1_target(
     text: str,
-    match_idx: int,
+    match_idx: Optional[int],
 ) -> Tuple[int, float]:
     """
-    Scan the window around match_idx for positive/negative target words.
+    Scan for positive/negative target words near match_idx.
+
+    match_idx=None means the signal has no keyword position (semantic,
+    zero-shot, or MFT trigger) — in that case the full passage is searched
+    rather than a 120-char window around an arbitrary position.
+
     Returns (polarity, confidence).
     """
-    start = max(0, match_idx - _TARGET_WINDOW)
-    end   = min(len(text), match_idx + _TARGET_WINDOW)
-    window = text[start:end].lower()
+    if match_idx is None:
+        # No keyword anchor — search the entire passage
+        window = text.lower()
+    else:
+        start  = max(0, match_idx - _TARGET_WINDOW)
+        end    = min(len(text), match_idx + _TARGET_WINDOW)
+        window = text[start:end].lower()
 
-    pos_hits: List[str] = [w for w in POSITIVE_TARGET_WORDS if w in window]
-    neg_hits: List[str] = [w for w in NEGATIVE_TARGET_WORDS if w in window]
+    pos_matches = list(_POS_TARGET_RE.finditer(window))
+    neg_matches = list(_NEG_TARGET_RE.finditer(window))
 
-    if not pos_hits and not neg_hits:
+    if not pos_matches and not neg_matches:
         return 0, 0.0
 
-    # Check for inversion pattern in the same window
-    inverted = bool(_INVERSION_RE.search(window))
+    # Collect positions of all target words for proximity-aware inversion check
+    target_positions = [m.start() for m in pos_matches + neg_matches]
+    inverted = _inversion_near_target(window, target_positions)
+
+    pos_hits = [m.group() for m in pos_matches]
+    neg_hits = [m.group() for m in neg_matches]
 
     if pos_hits and not neg_hits:
         polarity = -1 if inverted else +1
@@ -152,8 +238,7 @@ def _tier1_target(
         polarity = +1 if inverted else -1
         return polarity, _CONF_INVERTED if inverted else _CONF_DIRECT
 
-    # Both present — competing signals. Inversion complicates further.
-    # Resolve by count: majority wins, confidence reduced.
+    # Both present — competing signals. Resolve by count; confidence reduced.
     if len(pos_hits) > len(neg_hits):
         polarity = -1 if inverted else +1
     elif len(neg_hits) > len(pos_hits):
@@ -161,7 +246,7 @@ def _tier1_target(
     else:
         return 0, 0.0  # tied — genuinely ambiguous
 
-    return polarity, round(_CONF_DIRECT * 0.75, 4)  # reduced confidence for contested
+    return polarity, round(_CONF_DIRECT * 0.75, 4)
 
 
 # ---------------------------------------------------------------------------
@@ -198,21 +283,19 @@ def _tier2_lexicon(
 
     # Tier 1 has a result — adjust confidence
     if tier1_polarity == -1 and lexicon_vice_score > 0.0:
-        # Confirmation: vice signal agrees with negative polarity
         boosted = min(1.0, tier1_conf + lexicon_vice_score * 0.15)
         return -1, round(boosted, 4)
 
     if tier1_polarity == +1 and lexicon_virtue_score > 0.0:
-        # Confirmation: virtue signal agrees with positive polarity
         boosted = min(1.0, tier1_conf + lexicon_virtue_score * 0.15)
         return +1, round(boosted, 4)
 
     if tier1_polarity == +1 and lexicon_vice_score > tier1_conf:
-        # Contradiction: strong vice signal overrides weak positive tier1
+        # Strong vice signal overrides weak positive tier1
         return -1, round(lexicon_vice_score * 0.65, 4)
 
     if tier1_polarity == -1 and lexicon_virtue_score > tier1_conf:
-        # Contradiction: strong virtue signal overrides weak negative tier1
+        # Strong virtue signal overrides weak negative tier1
         return +1, round(lexicon_virtue_score * 0.65, 4)
 
     return tier1_polarity, tier1_conf
@@ -229,14 +312,17 @@ def _tier3_zeroshot(
 ) -> Tuple[int, float]:
     """
     Ask the zero-shot DeBERTa classifier whether the value is applied
-    destructively. Only fires when cfg.zeroshot_enabled is True.
+    destructively. Only fires when BOTH zeroshot_enabled AND
+    polarity_zeroshot_enabled are True in the config.
 
     Hypothesis: "The person applies {value} in a harmful or destructive way."
     """
     try:
         if not getattr(cfg, "zeroshot_enabled", False):
             return 0, 0.0
-        if not getattr(cfg, "polarity_zeroshot_enabled", True):
+        # Default False — must be explicitly opted in; mismatched config objects
+        # (stubs, older configs) must not accidentally enable zero-shot polarity.
+        if not getattr(cfg, "polarity_zeroshot_enabled", False):
             return 0, 0.0
 
         from core.zero_shot_layer import zero_shot_entailment, is_available
@@ -249,7 +335,7 @@ def _tier3_zeroshot(
         if score >= threshold:
             return -1, round(score * _CONF_TIER3_BASE / threshold, 4)
 
-        # If entailment is very low, weakly affirm positive
+        # Very low entailment weakly affirms positive
         if score < 0.25:
             return +1, round((0.25 - score) * 0.5, 4)
 
@@ -264,7 +350,7 @@ def _tier3_zeroshot(
 
 def detect_polarity(
     text: str,
-    match_idx: int,
+    match_idx: Optional[int],
     value_name: str,
     lexicon_vice_score: float = 0.0,
     lexicon_virtue_score: float = 0.0,
@@ -275,7 +361,10 @@ def detect_polarity(
 
     Args:
         text:                 Full passage text.
-        match_idx:            Character index of the value keyword match.
+        match_idx:            Character index of the value keyword match, or
+                              None for signals without a keyword position
+                              (semantic, zero-shot, MFT).  None causes Tier 1
+                              to search the entire passage rather than a window.
         value_name:           The Ethos value name (e.g., "loyalty").
         lexicon_vice_score:   MFD2.0/MoralStrength vice confidence for this passage/value.
         lexicon_virtue_score: MFD2.0/MoralStrength virtue confidence.
@@ -289,7 +378,7 @@ def detect_polarity(
     Never raises. Returns (0, 0.0) on any error.
     """
     try:
-        # Tier 1: target word proximity
+        # Tier 1: target word proximity (word-boundary regex, proximity-aware inversion)
         p1, c1 = _tier1_target(text, match_idx)
 
         # Tier 2: MFT lexicon integration
