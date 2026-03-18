@@ -99,6 +99,7 @@ def ingest(
     dry_run: bool = False,
     extract: bool = True,
     doc_title: str = "",
+    pronoun: str = "unknown",
 ) -> int:
     """
     Ingest passages from source_file for figure_name.
@@ -141,6 +142,7 @@ def ingest(
         significance=significance,
         run_extract=extract,
         doc_title=doc_title,
+        pronoun=pronoun,
     )
 
     if not result.ok:
@@ -206,6 +208,11 @@ def main() -> int:
                         help="Significance score for all passages (default: auto from doc-type)")
     parser.add_argument("--doc-title", default="",
                         help="Document title for corpus tracking (e.g. 'Meditations', 'Letter to Atticus')")
+    parser.add_argument(
+        "--pronoun", required=True,
+        choices=["he", "she", "they", "i"],
+        help="Figure's pronoun — used for subject/object resolution in phrase detection",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="Preview segmentation only — no DB writes")
     parser.add_argument("--no-extract", action="store_true",
@@ -222,6 +229,7 @@ def main() -> int:
         dry_run=args.dry_run,
         extract=not args.no_extract,
         doc_title=args.doc_title,
+        pronoun=args.pronoun,
     )
 
     if not args.dry_run and count > 0:

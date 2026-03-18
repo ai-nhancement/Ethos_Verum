@@ -112,7 +112,7 @@ class TestInputValidation:
                 source_lang="en", source_authenticity=1.0,
                 pub_year=None, error=None)
             r = client.post("/figures/test/ingest",
-                            json={"text": "Some text.", "significance": 0.0})
+                            json={"text": "Some text.", "significance": 0.0, "pronoun": "he"})
         assert r.status_code == 200
         _, kwargs = m.call_args
         assert kwargs["significance"] == 0.0
@@ -126,7 +126,7 @@ class TestInputValidation:
                 source_lang="en", source_authenticity=1.0,
                 pub_year=None, error=None)
             r = client.post("/figures/test/ingest",
-                            json={"text": "Some text.", "significance": 1.0})
+                            json={"text": "Some text.", "significance": 1.0, "pronoun": "he"})
         assert r.status_code == 200
 
     # --- min_demonstrations ---
@@ -176,7 +176,7 @@ class TestInputValidation:
                 source_lang="en", source_authenticity=0.85,
                 pub_year=None, error=None)
             r = client.post("/figures/test/ingest",
-                            json={"text": "Some text.", "is_translation": 1})
+                            json={"text": "Some text.", "is_translation": 1, "pronoun": "he"})
         assert r.status_code in (200, 422)
 
     # --- missing required fields ---
@@ -207,7 +207,8 @@ class TestInputValidation:
                 source_lang="en", source_authenticity=1.0,
                 pub_year=None, error=None)
             r = client.post("/figures/test/ingest",
-                            json={"text": "Some text.", "doc_type": "not_a_real_type"})
+                            json={"text": "Some text.", "doc_type": "not_a_real_type",
+                                  "pronoun": "he"})
         # Accepted — the pipeline (not the API) decides what to do with unknown doc_types
         assert r.status_code == 200
         _, kwargs = m.call_args
@@ -494,6 +495,7 @@ class TestRealPipeline:
         r_ingest = client.post("/figures/braveheart/ingest", json={
             "text": self._COURAGE_TEXT,
             "doc_type": "action",
+            "pronoun": "he",
         })
         assert r_ingest.status_code == 200
         assert r_ingest.json()["passages_ingested"] > 0
@@ -509,7 +511,7 @@ class TestRealPipeline:
         After ingest, the figure must appear in GET /figures.
         Fails if figure_sources isn't written, or if get_figures_list is broken.
         """
-        client.post("/figures/listed_figure/ingest", json={"text": self._COURAGE_TEXT})
+        client.post("/figures/listed_figure/ingest", json={"text": self._COURAGE_TEXT, "pronoun": "he"})
         r = client.get("/figures")
         names = [f["figure_name"] for f in r.json()["figures"]]
         assert "listed_figure" in names
@@ -548,6 +550,7 @@ class TestRealPipeline:
         r_ingest = client.post("/figures/noextract/ingest", json={
             "text": self._COURAGE_TEXT,
             "run_extract": False,
+            "pronoun": "he",
         })
         assert r_ingest.status_code == 200
         assert r_ingest.json()["observations_recorded"] == 0
@@ -564,6 +567,7 @@ class TestRealPipeline:
         r_ingest = client.post("/figures/novalue/ingest", json={
             "text": self._EMPTY_TEXT,
             "doc_type": "unknown",
+            "pronoun": "he",
         })
         assert r_ingest.status_code == 200
         r_profile = client.get("/figures/novalue/profile")
@@ -578,10 +582,10 @@ class TestRealPipeline:
         Fails if doc_type isn't stored, read back, or fed to compute_resistance.
         """
         client.post("/figures/action_hero/ingest", json={
-            "text": self._COURAGE_TEXT, "doc_type": "action"
+            "text": self._COURAGE_TEXT, "doc_type": "action", "pronoun": "he"
         })
         client.post("/figures/speech_hero/ingest", json={
-            "text": self._COURAGE_TEXT, "doc_type": "speech"
+            "text": self._COURAGE_TEXT, "doc_type": "speech", "pronoun": "he"
         })
         r_action = client.get("/figures/action_hero/profile")
         r_speech = client.get("/figures/speech_hero/profile")
@@ -610,7 +614,7 @@ class TestRealPipeline:
         Fails if any factor is miscalculated or stored incorrectly.
         """
         client.post("/figures/weightcheck/ingest", json={
-            "text": self._COURAGE_TEXT, "doc_type": "action"
+            "text": self._COURAGE_TEXT, "doc_type": "action", "pronoun": "he"
         })
         r = client.get("/figures/weightcheck/profile")
 
@@ -626,7 +630,7 @@ class TestRealPipeline:
         not a hardcoded or estimated count.
         """
         r = client.post("/figures/passcount/ingest", json={
-            "text": self._COURAGE_TEXT, "doc_type": "journal"
+            "text": self._COURAGE_TEXT, "doc_type": "journal", "pronoun": "he"
         })
         data = r.json()
         assert data["passages_ingested"] > 0

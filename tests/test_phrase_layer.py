@@ -392,3 +392,96 @@ class TestPolarityDirection:
         if destructive_sigs and opposition_sigs:
             assert any(s["polarity_hint"] == -1 for s in destructive_sigs)
             assert any(s["polarity_hint"] == 1 for s in opposition_sigs)
+
+
+# ---------------------------------------------------------------------------
+# Subject/object resolution — pronoun-aware agency detection
+# ---------------------------------------------------------------------------
+
+class TestSubjectResolution:
+    """
+    With a known figure pronoun, the phrase layer suppresses signals where
+    the figure is the recipient of a destructive act (not the perpetrator).
+    """
+
+    def test_figure_subject_emits_destructive(self):
+        # "He committed cruelty" — he = figure → emit -1
+        sigs, _ = phrase_signals(
+            "He committed acts of cruelty.",
+            0.7, "action", figure_name="john", pronoun="he",
+        )
+        assert any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_external_they_suppresses_destructive(self):
+        # "They committed cruelty" — they ≠ figure (figure is "he") → suppress
+        sigs, _ = phrase_signals(
+            "They committed acts of cruelty.",
+            0.7, "action", figure_name="john", pronoun="he",
+        )
+        assert not any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_cruelty_against_him_suppressed(self):
+        # "they committed cruelty against him" — him = figure → recipient → suppress
+        sigs, _ = phrase_signals(
+            "They committed cruelty against him without mercy.",
+            0.7, "action", figure_name="john", pronoun="he",
+        )
+        assert not any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_she_figure_subject_emits(self):
+        # Figure is "she"; "She committed cruelty" → agent → emit -1
+        sigs, _ = phrase_signals(
+            "She committed acts of cruelty against the prisoners.",
+            0.7, "action", figure_name="eleanor", pronoun="she",
+        )
+        assert any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_she_figure_he_subject_suppressed(self):
+        # Figure is "she"; "He committed cruelty" → external agent → suppress
+        sigs, _ = phrase_signals(
+            "He committed cruelty throughout the occupation.",
+            0.7, "action", figure_name="eleanor", pronoun="she",
+        )
+        assert not any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_figure_name_as_subject_emits(self):
+        # Figure name explicitly before verb → agent → emit -1
+        sigs, _ = phrase_signals(
+            "Gandhi committed acts of oppression.",
+            0.7, "action", figure_name="gandhi", pronoun="he",
+        )
+        assert any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_unknown_pronoun_emits_biographical_default(self):
+        # No pronoun → legacy mode → emit for any destructive verb match
+        sigs, _ = phrase_signals(
+            "They committed acts of cruelty.",
+            0.7, "action", figure_name="", pronoun="unknown",
+        )
+        # With unknown pronoun, no subject suppression → emit
+        assert any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_opposition_always_emits_regardless_of_pronoun(self):
+        # Opposition verbs always emit constructive signal — no subject check
+        sigs, _ = phrase_signals(
+            "She resisted cruelty throughout her life.",
+            0.7, "action", figure_name="john", pronoun="he",
+        )
+        # Even though figure is "he" and subject is "she", opposition always fires
+        assert any(s["polarity_hint"] == 1 for s in sigs)
+
+    def test_cruelty_against_her_suppressed_for_she_figure(self):
+        # Figure is "she"; "cruelty against her" → figure is recipient → suppress
+        sigs, _ = phrase_signals(
+            "They committed cruelty against her relentlessly.",
+            0.7, "action", figure_name="eleanor", pronoun="she",
+        )
+        assert not any(s["polarity_hint"] == -1 for s in sigs)
+
+    def test_i_pronoun_first_person_document(self):
+        # First-person document: "I committed cruelty" → figure is agent → emit -1
+        sigs, _ = phrase_signals(
+            "I committed acts of cruelty in those dark years.",
+            0.7, "journal", figure_name="napoleon", pronoun="i",
+        )
+        assert any(s["polarity_hint"] == -1 for s in sigs)

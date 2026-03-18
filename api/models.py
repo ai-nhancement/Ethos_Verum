@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 
 class IngestRequest(BaseModel):
     text:           str   = Field(..., description="Raw source text to ingest.")
+    pronoun:        str   = Field(..., description="Figure's pronoun: he|she|they|i")
     doc_type:       str   = Field("unknown",
                                   description="Document type: journal|letter|speech|action|unknown")
     pub_year:       Optional[int]  = Field(None, description="Publication year (e.g. 1863).")

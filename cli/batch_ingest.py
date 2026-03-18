@@ -18,6 +18,7 @@ Manifest format (JSON):
       "figures": [
         {
           "name": "gandhi",
+          "pronoun": "he",
           "sources": [
             {
               "file": "samples/gandhi_autobiography.txt",
@@ -103,6 +104,7 @@ def ingest_figure(
     default_significance: float = 0.90,
     dry_run: bool = False,
     extract: bool = True,
+    pronoun: str = "unknown",
 ) -> Dict:
     """
     Ingest all sources for one figure.
@@ -180,6 +182,7 @@ def ingest_figure(
             is_translation=is_translation,
             significance=sig,
             run_extract=False,
+            pronoun=pronoun,
         )
 
         if not ingest_result.ok:
@@ -253,6 +256,7 @@ def batch_ingest(
     for fig in figures:
         figure_name = fig.get("name", "").strip()
         sources     = fig.get("sources", [])
+        pronoun     = (fig.get("pronoun") or "unknown").lower().strip()
 
         if not figure_name:
             _log.warning("Skipping figure entry with no 'name'.")
@@ -270,6 +274,7 @@ def batch_ingest(
             default_significance=default_significance,
             dry_run=dry_run,
             extract=extract,
+            pronoun=pronoun,
         )
         results.append(r)
 

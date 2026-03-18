@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest --collect-only -q)",
+      "Bash(xargs ls:*)",
+      "Bash(grep -rn \"NotImplemented\\\\|pass.*#\\\\|PLACEHOLDER\\\\|WIP\\\\|not yet\\\\|future work\" /c/ethos --include=*.py)",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(python -m pytest tests/ --ignore=tests/test_layer3.py -q)",
+      "Bash(grep:*)",
+      "Bash(python -m pytest tests/test_structural_layer.py -q)",
+      "Bash(python -m pytest tests/ -q --tb=short)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python -m pytest tests/ -x -q)",
+      "WebSearch",
+      "WebFetch(domain:aclanthology.org)",
+      "WebFetch(domain:journals.sagepub.com)",
+      "WebFetch(domain:plato.stanford.edu)",
+      "WebFetch(domain:gwenythjpw.com)",
+      "WebFetch(domain:downloads.webis.de)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:zenodo.org)",
+      "WebFetch(domain:webis.de)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(python:*)",
+      "Bash(ls C:/ethos/tests/test_resistance*)",
+      "Bash(ls C:/ethos/tests/test_res*)"
+    ]
+  }
+}

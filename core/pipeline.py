@@ -25,6 +25,8 @@ _DEFAULT_SIGNIFICANCE = 0.75  # fallback when doc_type is unrecognised
 _FIGURE_NAME_RE      = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_\-]{0,63}$')
 _SENTENCE_SPLIT_RE   = re.compile(r'(?<=[.!?])\s+')
 
+_VALID_PRONOUNS = frozenset({"he", "she", "they", "i"})
+
 
 @dataclass
 class IngestResult:
@@ -69,6 +71,7 @@ def ingest_text(
     significance: Optional[float] = None,
     run_extract: bool = True,
     doc_title: str = "",
+    pronoun: str = "unknown",
 ) -> IngestResult:
     """
     Ingest raw text for a historical figure.
@@ -80,6 +83,11 @@ def ingest_text(
     doc_type using DOC_TYPE_DEFAULT_SIGNIFICANCE — e.g., 'action' → 0.90,
     'speech' → 0.70. Pass an explicit value to override.
 
+    pronoun: The figure's pronoun — one of "he", "she", "they", "i".
+             Required at the CLI and API layer. Defaults to "unknown" here
+             for programmatic callers and backward compatibility.
+             When set, enables subject/object resolution in the phrase layer.
+
     Never raises.
     """
     # Auto-infer significance from doc_type when caller does not supply one
@@ -87,6 +95,8 @@ def ingest_text(
         from core.config import DOC_TYPE_DEFAULT_SIGNIFICANCE
         dt_key = (doc_type or "unknown").lower().strip()
         significance = DOC_TYPE_DEFAULT_SIGNIFICANCE.get(dt_key, _DEFAULT_SIGNIFICANCE)
+
+    pronoun = (pronoun or "unknown").lower().strip()
 
     if not _FIGURE_NAME_RE.match(figure_name):
         return IngestResult(
@@ -148,6 +158,7 @@ def ingest_text(
             figure_name=figure_name,
             document_type=doc_type,
             passage_count=len(passages),
+            pronoun=pronoun,
         )
         val_store.register_figure_document(
             figure_name=figure_name,

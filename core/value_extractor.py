@@ -429,6 +429,8 @@ def _phrase_signals(
     significance: float,
     doc_type: str,
     cfg,
+    figure_name: str = "",
+    pronoun: str = "unknown",
 ) -> tuple:
     """
     Run phrase composition detection on a passage.
@@ -441,7 +443,8 @@ def _phrase_signals(
         return [], set()
     try:
         from core.phrase_layer import phrase_signals
-        return phrase_signals(text, significance, doc_type)
+        return phrase_signals(text, significance, doc_type,
+                              figure_name=figure_name, pronoun=pronoun)
     except Exception:
         return [], set()
 
@@ -723,6 +726,11 @@ def _run_extraction(session_id: str) -> int:
     doc_store = get_document_store()
     val_store = get_value_store()
 
+    # Fetch figure metadata (name + pronoun) for subject resolution in phrase layer
+    _fig_meta    = val_store.get_figure_meta(session_id)
+    _figure_name = _fig_meta["figure_name"]
+    _pronoun     = _fig_meta["pronoun"]
+
     watermark = doc_store.get_watermark(session_id)
     passages = doc_store.get_passages_since(session_id, watermark)
     if not passages:
@@ -760,7 +768,10 @@ def _run_extraction(session_id: str) -> int:
 
         # Phrase layer (Layer 1c) — compositional verb + vice-word detection
         # Emits signals with pre-determined polarity_hint; bypasses Tier 1/2 detection.
-        _p_sigs, _consumed_vice = _phrase_signals(text, significance, doc_type, cfg)
+        _p_sigs, _consumed_vice = _phrase_signals(
+            text, significance, doc_type, cfg,
+            figure_name=_figure_name, pronoun=_pronoun,
+        )
 
         # Semantic signals (Layer 2) — only if semantic layer available
         sem_signals = _semantic_signals(text, significance, cfg)

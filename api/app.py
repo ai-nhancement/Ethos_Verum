@@ -82,6 +82,13 @@ def ingest_figure(
     - **is_translation**: `true` = known translation (0.85×), `null` = auto-detect
     """
     from core.pipeline import ingest_text
+    from core.phrase_layer import VALID_PRONOUNS
+    pronoun_norm = (body.pronoun or "").lower().strip()
+    if pronoun_norm not in VALID_PRONOUNS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"pronoun must be one of: {sorted(VALID_PRONOUNS)}",
+        )
     result = ingest_text(
         figure_name=name,
         text=body.text,
@@ -90,6 +97,7 @@ def ingest_figure(
         is_translation=body.is_translation,
         significance=body.significance,
         run_extract=body.run_extract,
+        pronoun=pronoun_norm,
     )
     if not result.ok:
         raise HTTPException(status_code=422, detail=result.error)

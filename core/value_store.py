@@ -106,7 +106,8 @@ class ValueStore:
                 figure_name   TEXT NOT NULL,
                 document_type TEXT NOT NULL DEFAULT 'unknown',
                 ingested_at   REAL NOT NULL,
-                passage_count INTEGER NOT NULL DEFAULT 0
+                passage_count INTEGER NOT NULL DEFAULT 0,
+                pronoun       TEXT NOT NULL DEFAULT 'unknown'
             );
 
             CREATE TABLE IF NOT EXISTS figure_documents (
@@ -153,6 +154,7 @@ class ValueStore:
             "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'",
             "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE figure_sources ADD COLUMN pronoun TEXT NOT NULL DEFAULT 'unknown'",
         ):
             try:
                 conn.execute(_migration)
@@ -358,13 +360,14 @@ class ValueStore:
         figure_name: str,
         document_type: str,
         passage_count: int = 0,
+        pronoun: str = "unknown",
     ) -> None:
         try:
             conn = self._conn()
             conn.execute(
                 """INSERT INTO figure_sources
-                   (session_id, figure_name, document_type, ingested_at, passage_count)
-                   VALUES (?,?,?,?,?)
+                   (session_id, figure_name, document_type, ingested_at, passage_count, pronoun)
+                   VALUES (?,?,?,?,?,?)
                    ON CONFLICT(session_id) DO UPDATE SET
                        figure_name=excluded.figure_name,
                        document_type=CASE
@@ -373,12 +376,37 @@ class ValueStore:
                            ELSE 'mixed'
                        END,
                        ingested_at=excluded.ingested_at,
-                       passage_count=figure_sources.passage_count + excluded.passage_count""",
-                (session_id, figure_name, document_type, time.time(), passage_count),
+                       passage_count=figure_sources.passage_count + excluded.passage_count,
+                       pronoun=CASE
+                           WHEN excluded.pronoun != 'unknown'
+                               THEN excluded.pronoun
+                           ELSE figure_sources.pronoun
+                       END""",
+                (session_id, figure_name, document_type, time.time(), passage_count, pronoun),
             )
             conn.commit()
         except Exception:
             _log.warning("register_figure_source failed", exc_info=True)
+
+    def get_figure_meta(self, session_id: str) -> dict:
+        """
+        Return {figure_name, pronoun} for the given session_id.
+        Falls back to empty strings / 'unknown' if not found.
+        """
+        try:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT figure_name, pronoun FROM figure_sources WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            if row:
+                return {
+                    "figure_name": row["figure_name"] or "",
+                    "pronoun":     row["pronoun"] or "unknown",
+                }
+        except Exception:
+            _log.warning("get_figure_meta failed for %s", session_id, exc_info=True)
+        return {"figure_name": "", "pronoun": "unknown"}
 
     def register_figure_document(
         self,
