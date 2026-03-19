@@ -151,41 +151,30 @@ def _read_figure_observations(
     conn = sqlite3.connect(db_path, timeout=10.0)
     conn.row_factory = sqlite3.Row
     try:
-        if figure_filter:
-            session_id_filter = f"figure:{figure_filter.lower().strip()}"
-            rows = conn.execute(
-                """SELECT
+        _SELECT = """SELECT
                        vo.id, vo.session_id, vo.record_id, vo.ts,
                        vo.value_name, vo.text_excerpt,
                        vo.significance, vo.resistance,
                        COALESCE(vo.disambiguation_confidence, 1.0) AS disambiguation_confidence,
+                       COALESCE(vo.source, '')                     AS source,
+                       COALESCE(vo.value_polarity, 0)              AS value_polarity,
+                       COALESCE(vo.polarity_confidence, 0.0)       AS polarity_confidence,
                        COALESCE(fs.figure_name, SUBSTR(vo.session_id, 8)) AS figure_name,
                        COALESCE(fs.document_type, 'unknown')              AS document_type,
                        COALESCE(vr.consistency, 0.5)                      AS observation_consistency
                    FROM value_observations vo
                    LEFT JOIN figure_sources fs ON fs.session_id = vo.session_id
                    LEFT JOIN value_registry vr
-                       ON vr.session_id = vo.session_id AND vr.value_name = vo.value_name
-                   WHERE vo.session_id = ?
-                   ORDER BY vo.session_id, vo.ts""",
+                       ON vr.session_id = vo.session_id AND vr.value_name = vo.value_name"""
+        if figure_filter:
+            session_id_filter = f"figure:{figure_filter.lower().strip()}"
+            rows = conn.execute(
+                _SELECT + " WHERE vo.session_id = ? ORDER BY vo.session_id, vo.ts",
                 (session_id_filter,),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT
-                       vo.id, vo.session_id, vo.record_id, vo.ts,
-                       vo.value_name, vo.text_excerpt,
-                       vo.significance, vo.resistance,
-                       COALESCE(vo.disambiguation_confidence, 1.0) AS disambiguation_confidence,
-                       COALESCE(fs.figure_name, SUBSTR(vo.session_id, 8)) AS figure_name,
-                       COALESCE(fs.document_type, 'unknown')              AS document_type,
-                       COALESCE(vr.consistency, 0.5)                      AS observation_consistency
-                   FROM value_observations vo
-                   LEFT JOIN figure_sources fs ON fs.session_id = vo.session_id
-                   LEFT JOIN value_registry vr
-                       ON vr.session_id = vo.session_id AND vr.value_name = vo.value_name
-                   WHERE vo.session_id LIKE 'figure:%'
-                   ORDER BY vo.session_id, vo.ts""",
+                _SELECT + " WHERE vo.session_id LIKE 'figure:%' ORDER BY vo.session_id, vo.ts",
             ).fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -366,6 +355,23 @@ def build_training_records(
             text_excerpt, resistance, p1_threshold, p0_threshold
         )
 
+        # ── Panel override ────────────────────────────────────────────────
+        # If the comprehension panel verified this signal (+panel in source)
+        # and set a non-zero polarity, its verdict takes precedence over the
+        # text-marker heuristic — except for APY, which involves cross-passage
+        # pressure context the panel does not see.
+        obs_source   = str(obs.get("source", ""))
+        obs_polarity = int(obs.get("value_polarity", 0))
+        if "+panel" in obs_source and obs_polarity != 0 and label != "APY":
+            if obs_polarity == 1 and label != "P1":
+                label      = "P1"
+                reason     = "panel_confirmed_p1"
+                confidence = 0.90
+            elif obs_polarity == -1 and label != "P0":
+                label      = "P0"
+                reason     = "panel_confirmed_p0"
+                confidence = 0.90
+
         failure_hits = _find_markers(text_excerpt, _FAILURE_RE)
         hold_hits    = _find_markers(text_excerpt, _HOLD_RE)
         apy_hits     = _find_markers(text_excerpt, _APY_PRESSURE_RE)
@@ -434,6 +440,7 @@ def build_training_records(
             "pressure_markers": apy_hits,
             "failure_markers":  failure_hits,
             "hold_markers":             hold_hits,
+            "source":                    str(obs.get("source", "")),
             "disambiguation_confidence": round(float(obs.get("disambiguation_confidence", 1.0)), 4),
             "observation_consistency":   round(float(obs.get("observation_consistency", 0.5)), 4),
             "value_polarity":            int(obs.get("value_polarity", 0)),
