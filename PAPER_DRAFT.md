@@ -6,7 +6,7 @@
 
 ## Abstract
 
-The alignment of artificial intelligence systems with human values remains one of the central unsolved problems in AI safety research. Existing approaches draw on one of two sources: hypothetical moral scenarios designed by researchers, or human preference rankings collected at scale. Both inherit a fundamental limitation — they capture declared values, not demonstrated ones. We introduce **Ethos**, a behavioral extraction pipeline that derives value signal from documented historical behavior: journals, letters, speeches, and recorded actions of historical figures across the full human spectrum, from the canonically virtuous to the historically destructive. Ethos introduces two novel contributions: (1) a **resistance score** that quantifies the cost of holding a demonstrated value in context — a signal absent from all existing value alignment datasets — and (2) a **document authenticity weighting** scheme that calibrates evidence quality based on the performance pressure present at the time of writing. The pipeline produces labeled training data in three classes: P1 (value held under meaningful resistance), P0 (value failed or corrupted), and APY (Answer-Pressure Yield — value abandoned under identified external pressure). We argue that the most important signal in a value-alignment corpus lies not at the poles — celebrated saints or documented villains — but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moments of both extraordinary integrity and ordinary failure reside. A pilot extraction across three historical figures (Gandhi, Lincoln, Marcus Aurelius) produced 37 observations spanning 15 values, with cross-figure convergence on commitment, resilience, fairness, courage, and humility — and integrity emerging as the top-weighted value in Gandhi's corpus (weight 7.35, mean resistance 0.956). Ethos is the first pipeline designed to extract behavioral value evidence at scale from the historical record, and to score it for the cost of demonstration.
+The alignment of artificial intelligence systems with human values remains one of the central unsolved problems in AI safety research. Existing approaches draw on one of two sources: hypothetical moral scenarios designed by researchers, or human preference rankings collected at scale. Both inherit a fundamental limitation — they capture declared values, not demonstrated ones. We introduce **Ethos**, a behavioral extraction pipeline that derives value signal from documented historical behavior: journals, letters, speeches, and recorded actions of historical figures across the full human spectrum, from the canonically virtuous to the historically destructive. Ethos introduces four novel contributions: (1) a **resistance score** that quantifies the cost of holding a demonstrated value in context — a signal absent from all existing value alignment datasets; (2) a **document authenticity weighting** scheme that calibrates evidence quality based on the performance pressure present at the time of writing; (3) a **two-axis value model** (resistance × polarity) that distinguishes demonstration strength from constructive/destructive direction; and (4) a **comprehension panel** — three-model majority-vote post-extraction verification that independently confirms or discards each extracted signal. The pipeline produces labeled training data in three classes: P1 (value held under meaningful resistance), P0 (value failed or corrupted), and APY (Answer-Pressure Yield — value abandoned under identified external pressure). We argue that the most important signal in a value-alignment corpus lies not at the poles — celebrated saints or documented villains — but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moments of both extraordinary integrity and ordinary failure reside. A full-pipeline extraction on a 12-passage Gandhi sample produced 46 observations across 12 values; 38/46 (83%) were panel-verified, and false-positive P0 signals were reduced by 64%. Cross-figure convergence testing across Gandhi, Lincoln, and Marcus Aurelius confirmed 5 values present in all three figures across radically different historical contexts and centuries. Ethos is the first pipeline designed to extract behavioral value evidence at scale from the historical record, to score it for the cost of demonstration, and to verify each signal through independent multi-model consensus.
 
 ---
 
@@ -28,11 +28,14 @@ Two research gaps motivate this work. First, no existing NLP dataset extracts hu
 
 Our contributions are:
 
-1. A **behavioral extraction pipeline** (Ethos) that generates value signal from historical text using deterministic keyword and marker analysis — no LLM required.
+1. A **behavioral extraction pipeline** (Ethos) that generates value signal from historical text using multi-layer deterministic extraction — keyword, lexicon, phrase, structural, semantic, and classifier layers — with no LLM required for base operation.
 2. A **resistance scoring framework** that estimates the cost of demonstrating a value in context, incorporating document authenticity, significance, and adversity language markers.
 3. A **three-class labeling scheme** (P1/P0/APY) that captures held values, failed values, and pressure-yield dynamics — the APY class being novel to this work.
-4. An argument for the **spectrum principle**: that the most valuable training signal for value alignment lies not at the behavioral poles but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moral failure coexist in the same person.
-5. Four **implemented quality extensions** beyond the base pipeline: cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, and observation consistency scoring.
+4. A **two-axis value model** (resistance × polarity) that distinguishes the strength of value demonstration from its constructive/destructive direction, enabling explicit representation of vice signals and P0 classification from lexical evidence.
+5. A **pronoun-aware phrase layer** (L1c) that disambiguates first-person agency from third-person description and passive framing, improving attribution accuracy without dependency on a full syntactic parser.
+6. An optional **comprehension panel** — three-model majority-vote verification (DigitalOcean Gradient API) — that fires post-extraction to filter false positives and upgrade signal polarity labels, reducing false-positive P0 signals by approximately 64% in pilot testing.
+7. An argument for the **spectrum principle**: that the most valuable training signal for value alignment lies not at the behavioral poles but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moral failure coexist in the same person.
+8. Six **implemented quality extensions** beyond the base pipeline: cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, observation consistency scoring, source chain tracking, and corpus quality gating.
 
 ---
 
@@ -82,7 +85,9 @@ Ethos is a three-stage pipeline:
 2. **Extraction:** Each passage is scanned against a 15-value vocabulary. Matching passages receive a resistance score. Observations are stored in an append-only ledger.
 3. **Export:** Observations are classified (P1/P0/APY) using resistance scores and text marker analysis. Training records are written as JSONL with full provenance metadata.
 
-The pipeline is deterministic throughout. No LLM call occurs at any stage. Given identical input and identical thresholds, output is identical. This is a design requirement: a training data generation tool must be reproducible and auditable.
+The base pipeline is deterministic throughout. The keyword, lexicon, phrase, structural, semantic, and classifier layers produce identical output given identical input and thresholds. This is a design requirement: a training data generation tool must be reproducible and auditable.
+
+An optional fourth stage — **verification** — may be applied after extraction: the comprehension panel queries three LLMs in parallel with binary questions (Q1: "does the figure hold this value?" / Q2: "does the figure violate this value?") and applies majority-vote verdicts (≥2/3 models agreeing) to filter, relabel, or split extracted signals. This stage is disabled by default; the pipeline operates fully without it. When enabled, verification introduces non-determinism bounded to the signal-filtering pass — the extraction outputs are preserved and only the final signal list is modified.
 
 ### 3.2 Segmentation
 
@@ -169,7 +174,26 @@ During export, each value observation is classified into one of four labels:
 
 Classification priority: APY context is checked first (most specific), then failure markers, then resistance thresholds.
 
-### 3.7 Extended Pipeline Features
+### 3.7 Phrase Layer and Polarity Scoring
+
+**Pronoun-aware phrase layer (L1c).** Keyword and lexicon layers detect value-relevant language but not agency — whether the figure is the grammatical agent of the demonstrated act. "He refused to compromise" and "I refused to compromise" carry different evidential weight. The phrase layer applies pronoun-aware subject/object resolution to distinguish first-person agency from third-person description and passive framing. The distinction is bypassed for `action`-type documents, where biographical third-person framing is valid evidence of the figure's own behavior.
+
+**Two-axis polarity layer.** The original one-axis resistance model could not represent value direction — a high-resistance observation might be constructive demonstration or destructive expression of the same value. The polarity layer assigns `value_polarity` (+1 constructive, −1 destructive, 0 unscored) and `polarity_confidence` (0.0–1.0) to each observation using three tiers: a per-value target lexicon, MFT vice/virtue signals from the lexicon layer, and an optional zero-shot pass. This enables explicit P0 labeling from lexical evidence — not only from explicit failure markers — and makes vice signals from the MFD2.0 lexicon first-class observations rather than discarded noise.
+
+### 3.8 Comprehension Panel
+
+After all deterministic extraction layers complete, an optional verification stage may be applied. The comprehension panel queries three independent language models in parallel via DigitalOcean's Gradient API. For each extracted signal, each model is asked two binary questions: Q1 — "Does this passage demonstrate that the figure holds this value?" and Q2 — "Does this passage demonstrate that the figure violates this value?"
+
+Four verdicts are possible from majority vote (≥2/3 models agreeing):
+- **P1** — Q1 positive majority → signal confirmed positive; `polarity_hint` set to +1
+- **P0** — Q2 positive majority → signal confirmed negative; `polarity_hint` set to −1
+- **tension** — both Q1 and Q2 positive majority → signal duplicated as both P1 and P0 observations
+- **discard** — neither positive majority → signal removed
+- **skip** — insufficient model responses (≥2 abstentions) → signal passed through unchanged
+
+The panel appends `+panel` to the `source` chain in `value_observations`, making panel-verified signals fully auditable. The panel is fail-open at every boundary: missing API key, import error, call timeout, and response parse failure all result in the original signal being returned unchanged.
+
+### 3.9 Extended Pipeline Features
 
 The following quality extensions are fully implemented in the current release:
 
@@ -222,7 +246,11 @@ The spectrum principle is implemented architecturally through the **no-pre-label
 
 ## 5. Preliminary Results
 
-We report results from a pilot extraction across three historical figures: Gandhi (journal passages, 1927), Lincoln (letters, mixed period), and Marcus Aurelius (*Meditations*, ~180 AD). The corpus was deliberately small — designed to validate the pipeline and demonstrate cross-figure convergence rather than to claim statistical significance.
+We report two sets of results. The first is a multi-figure pilot demonstrating cross-figure convergence. The second is a single-figure deep test of the full pipeline including the comprehension panel.
+
+### 5.1 Multi-Figure Pilot
+
+Extraction across three historical figures — Gandhi (journal passages, 1927), Lincoln (letters, mixed period), and Marcus Aurelius (*Meditations*, ~180 AD) — validated the pipeline and demonstrated cross-figure value convergence.
 
 **Pilot corpus summary:**
 
@@ -234,11 +262,24 @@ We report results from a pilot extraction across three historical figures: Gandh
 
 **Cross-figure value convergence:** Five values were detected in all three figures: `commitment`, `resilience`, `fairness`, `courage`, and `humility`. This convergence across radically different historical contexts, cultures, and centuries supports the claim that the 15-value vocabulary captures behavioral signals that are not period- or culture-specific.
 
-**Top-weighted value:** `integrity` in Gandhi's corpus (9 demonstrations, weight 7.35, mean resistance 0.956). Gandhi's journal entries, as private writing under conditions of political persecution, produce the highest-resistance observations in the pilot corpus — consistent with the document type weighting design.
+### 5.2 Full-Pipeline Verification Test (Gandhi)
 
-**P1/P0 classification smoke test (6-passage balanced sample):** 8 P1 (held under resistance), 4 P0 (failed — humility correctly flagged on self-confessed failures). The 2:1 ratio on a deliberately balanced input is consistent with expected behavior: the pipeline is more sensitive to P1 signals in journal text than P0 signals, which tend to require explicit failure marker language.
+A full-pipeline extraction — including all L1–L3c layers and the comprehension panel — was run on a 12-passage Gandhi sample covering the full behavioral spectrum: nonviolent resistance, imprisonment, South Africa racial hierarchy positions, brahmacharya experiments, Noakhali riots courage, and public self-criticism.
 
-These results are preliminary. They are intended to demonstrate pipeline functionality rather than validate the corpus as a training resource. Validation at scale — with broader figure coverage, independent annotation of sample observations, and downstream model evaluation — is the target of the Phase 4–7 roadmap.
+**Results:**
+- **46 observations** extracted across **12 distinct values**
+- **38/46 (83%)** panel-verified — source chain includes `+panel`
+- **4 P0 signals** remaining after panel filtering (down from ~11 pre-panel, a 64% false-positive reduction)
+- Correctly identified P0 violations: South Africa racial hierarchy acceptance (fairness), brahmacharya experiments imposing personal austerities without full consent (integrity, responsibility)
+- Correctly confirmed P1 holds: nonviolent resistance to Rowlatt Act, Noakhali riot courage under daily death threats, fast unto death in Calcutta, public acknowledgment of personal failures
+
+**Sample source chains:** `keyword+semantic+zeroshot+panel`, `keyword+structural+panel`, `keyword+lexicon+mft+panel`
+
+These results demonstrate that the multi-layer convergent architecture produces defensible signal classification: observations independently confirmed by multiple layers and verified by the panel are the strongest training examples in the corpus.
+
+**Panel performance note:** At base-tier DigitalOcean models (`openai-gpt-oss-120b`, `deepseek-r1-distill-llama-70b`, `openai-gpt-oss-20b`), verification ran at approximately 34 seconds per passage. Premium tier models (Claude Opus 4.6, GPT-5.4, O3) are expected to reduce both latency and false-negative rate.
+
+These results are preliminary. They are intended to demonstrate pipeline functionality and panel effectiveness rather than to validate the corpus as a training resource. Validation at scale — with broader figure coverage, independent annotation of sample observations, and downstream model evaluation — is the target of the Phase 4–7 roadmap.
 
 ---
 
@@ -316,7 +357,7 @@ The central problem with current value-alignment datasets is not their size or m
 
 Ethos addresses this gap by turning to the one source of evidence that captures values under real conditions: documented human history. The historical record contains thousands of first-person accounts of values demonstrated, failed, and abandoned under circumstances ranging from mortal threat to political convenience to intimate betrayal. That evidence has never been systematically extracted, scored for resistance, and labeled for value alignment training purposes.
 
-We have described a pipeline that does this extraction: deterministic, auditable, reproducible, requiring no external model calls, and designed around two novel contributions — the resistance score and the spectrum principle — that distinguish Ethos from all existing approaches. We have further described and implemented four quality extensions — cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, and observation consistency scoring — that address the most significant structural limitations of the base pipeline.
+We have described a pipeline that does this extraction: deterministic in its core layers, auditable at every step through source chain tracking, and designed around four novel contributions — the resistance score, the spectrum principle, the two-axis polarity model, and the comprehension panel — that distinguish Ethos from all existing approaches. We have further described and implemented quality extensions — cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, observation consistency scoring, pronoun-aware phrase analysis, and corpus quality gating — that address the most significant structural limitations of the base pipeline.
 
 The APY class deserves particular emphasis. A value held at cost is strong signal. A value abandoned under identified external pressure is the strongest negative signal. The dynamics of that failure — the gap between pressure and capitulation, the rationalizations that accompany it, the figures who held longer before yielding versus those who yielded immediately — are the behavioral evidence that alignment research most needs and currently lacks entirely. Ethos is the first pipeline designed to extract it.
 

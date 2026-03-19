@@ -84,6 +84,11 @@ class Config:
     polarity_zeroshot_enabled: bool = False  # enable Tier 3 zero-shot polarity check
     polarity_zeroshot_threshold: float = 0.55  # min entailment for negative polarity
 
+    # Comprehension panel — three-model signal verification (Claude + GPT + Gemini)
+    # Requires ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY env vars.
+    # Off by default; enable when API keys are configured.
+    comprehension_panel_enabled: bool = False
+
 
 _default: Config | None = None
 

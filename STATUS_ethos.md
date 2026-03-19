@@ -6,7 +6,7 @@
 >
 > *"We didn't invent values. We extracted them from people who lived them — and people who didn't."*
 
-**Last Updated:** 2026-03-16 (Phase 6 complete)
+**Last Updated:** 2026-03-18 (Comprehension panel + phrase layer + polarity layer complete)
 **Version:** Living document — update whenever a phase completes or design changes.
 
 ---
@@ -376,6 +376,62 @@ python -m cli.dataset_card --output DATASET_CARD.md
 
 ---
 
+## Phrase Layer (L1c) ✅ (2026-03-17)
+
+**Goal:** Pronoun-aware subject/object resolution to distinguish first-person agency ("I refused") from third-person description ("he refused") and passive framings.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `core/phrase_layer.py` | ✅ | Pronoun-aware subject/object resolution. Detects whether the figure is the grammatical agent of a value-relevant act. |
+| Agency scoring | ✅ | First-person agency boosts `disambiguation_confidence`; third-person or passive framings receive lower weight. |
+| Integration | ✅ | Layer L1c fires after L1b lexicon, before L2 semantic. Source tag: `+phrase`. |
+| `action` doc_type bypass | ✅ | Biographical third-person framing valid for action doc_type — agency check bypassed. |
+
+---
+
+## Polarity Layer ✅ (2026-03-17)
+
+**Goal:** Two-axis value model — resistance (strength) × polarity (constructive/destructive direction). Enables vice signal detection and P0 labeling from lexicon rather than just failure markers.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `core/polarity_layer.py` | ✅ | Tier 1: target lexicon (positive/negative lists per value). Tier 2: MFT vice/virtue signals. Tier 3: optional zero-shot polarity. |
+| `value_polarity` column | ✅ | `value_observations.value_polarity` — +1 constructive, -1 destructive, 0 unscored. |
+| `polarity_confidence` column | ✅ | Confidence in polarity assignment (0.0–1.0). |
+| Vice signals | ✅ | Negative-polarity lexicon signals from L1b now flow as P0-candidate observations (previously discarded). |
+
+---
+
+## Comprehension Panel ✅ (2026-03-18)
+
+**Goal:** Three-model majority-vote verification layer that fires after all L1–L3c extraction layers. Independently asks each model two binary questions per value per passage: Q1 "does the figure hold this value?" and Q2 "does the figure violate this value?". Majority verdict (≥2/3) determines signal fate.
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `core/comprehension_panel.py` | ✅ | Three-model majority vote. Binary Q1/Q2 per value per passage. Verdicts: P1, P0, tension, discard, skip. |
+| DigitalOcean Gradient API | ✅ | Single `gradient` SDK, single `MODEL_ACCESS_KEY`. Three models queried in parallel via `asyncio.to_thread`. |
+| Current models (base tier) | ✅ | `openai-gpt-oss-120b`, `deepseek-r1-distill-llama-70b`, `openai-gpt-oss-20b` |
+| Preferred models (need DO premium tier) | 💡 | `anthropic-claude-opus-4.6`, `openai-gpt-5.4`, `openai-o3` — commented in source |
+| Config flag | ✅ | `cfg.comprehension_panel_enabled = False` — off by default. No `MODEL_ACCESS_KEY` required for normal operation. |
+| Fail-open design | ✅ | Missing SDK → skip. Missing key → skip. Call timeout → abstain. Two+ abstains per value → skip (signal unchanged). |
+| Source chain tracking | ✅ | Panel adds `+panel` to `value_observations.source` for every verified signal. |
+| Verdict → polarity | ✅ | P1 verdict → `polarity_hint = +1`; P0 verdict → `polarity_hint = -1`; tension → duplicate signal at +1 and -1; discard → remove signal. |
+| Tests | ✅ | `tests/test_comprehension_panel.py` — 42 tests: model IDs, response parsing, vote tallying, signal filtering, is_available. |
+
+**Real test results (Gandhi, 12 passages, panel enabled):**
+- 46 observations extracted across 12 values
+- 38/46 observations panel-verified (source chain includes `+panel`)
+- False-positive P0 signals reduced: ~11 → 4
+- Source chain example: `keyword+semantic+zeroshot+panel`
+- Panel cost: ~410s for 12 passages (~34s/passage at base model tier)
+
+**Pending:**
+- Panel cost/latency gate: optional min-confidence threshold before invoking panel
+- Premium model tier unlock on DigitalOcean account
+- Tests for corpus quality gate (`test_corpus_quality.py`)
+
+---
+
 ## Phase 5 — Web Dashboard ⏳
 
 | Feature | Status |
@@ -436,6 +492,22 @@ python -m cli.dataset_card --output DATASET_CARD.md
 ### 2026-03-16 — Resistance computation is passage-scoped
 **Decision:** `compute_resistance(text, significance, doc_type)` is called once per passage, not once per signal. The result guards the entire write block via `if resistance >= cfg.min_resistance_threshold:`.
 **Rationale:** All three arguments (`text`, `significance`, `doc_type`) are fixed for a given passage — every signal extracted from the same passage has identical resistance. Calling it N times per passage is semantically redundant and computationally wasteful. The guard structure also makes the threshold logic explicit at the call site rather than buried inside an iterating loop.
+
+### 2026-03-17 — Pronoun-aware phrase layer (L1c)
+**Decision:** Added `core/phrase_layer.py` as Layer L1c — pronoun-aware subject/object resolution that fires after the lexicon layer and before the semantic layer.
+**Rationale:** The keyword and lexicon layers detect value-relevant language but not who is the agent. "He refused to compromise" vs "I refused to compromise" produce different evidential weights — the figure must be the grammatical agent for the signal to be a first-person behavioral demonstration. The phrase layer encodes this distinction without dependency on a full NLP parser.
+
+### 2026-03-17 — Two-axis value model: resistance × polarity
+**Decision:** Added `core/polarity_layer.py` with a three-tier polarity scoring scheme (target lexicon → MFT vice/virtue → optional zero-shot). Value observations carry `value_polarity` (+1/0/−1) and `polarity_confidence` columns.
+**Rationale:** The original one-axis model (resistance only) could not represent value direction — a high-resistance observation might be constructive demonstration or destructive expression of the same value. The two-axis model enables explicit P0 labeling from lexicon signals (destructive polarity) rather than exclusively from failure marker text patterns, which were under-detecting value failures.
+
+### 2026-03-18 — Comprehension panel as optional post-extraction verification
+**Decision:** Added `core/comprehension_panel.py` as an optional verification layer that fires after all L1–L3c extraction layers. Disabled by default (`cfg.comprehension_panel_enabled = False`). The pipeline continues to operate fully without it.
+**Rationale:** The keyword/semantic/structural pipeline is fast, deterministic, and reproducible — these properties are preserved. The comprehension panel is not in the core extraction path; it is a post-processing verification layer that can be toggled on for higher-precision corpus production runs. The fail-open design ensures that panel unavailability (missing key, API error, timeout) never degrades the base pipeline. This preserves the determinism invariant for unverified runs while enabling LLM-backed verification when available.
+
+### 2026-03-18 — DigitalOcean Gradient API for panel models
+**Decision:** Panel uses a single `gradient` SDK with one `MODEL_ACCESS_KEY` pointing to DigitalOcean's model API, rather than separate Anthropic/OpenAI/Google SDKs.
+**Rationale:** Single SDK, single key, single billing relationship. DigitalOcean Gradient provides access to multiple model providers under one API surface. Current base-tier models (`openai-gpt-oss-120b`, `deepseek-r1-distill-llama-70b`, `openai-gpt-oss-20b`) are sufficient for verification. Premium models (Claude Opus 4.6, GPT-5.4, O3) can be unlocked without code changes.
 
 ### 2026-03-16 — MFT lexicon mappings must stay synchronized
 **Decision:** `core/mft_classifier.py::MFT_VIRTUE_TO_ETHOS` and `core/lexicon_layer.py::_MFT_TO_ETHOS` must be kept in sync. Both map the same 5 MFT foundations to Ethos values. The classifier mapping may be slightly broader (it also maps `integrity` for fairness), but the core foundation→value assignments must agree.

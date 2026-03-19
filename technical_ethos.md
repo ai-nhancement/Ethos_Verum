@@ -2,8 +2,8 @@
 
 > **System class:** Universal Value Extraction Pipeline (UVEP)
 > **Core claim:** Human values are not pre-installed rules. They are behavioral patterns — observable in text, extractable with deterministic computation, and verifiable through accumulation across figures, eras, and cultures.
-> **Core invariant:** No LLM call anywhere in the extraction stack. All classification is deterministic Python.
-> **Architecture:** Standalone pipeline. Ingest any figure → extract value signals → score resistance → export labeled training data.
+> **Core invariant:** Extraction is deterministic and reproducible. The keyword, lexicon, phrase, structural, and semantic layers are fully deterministic given fixed model weights. An optional comprehension panel (LLM-backed verification, off by default) operates post-extraction and does not affect base pipeline reproducibility.
+> **Architecture:** Standalone pipeline. Ingest any figure → extract value signals → score resistance → optional panel verification → export labeled training data.
 
 ---
 
@@ -41,7 +41,7 @@
 
 ## 1. Architecture Overview
 
-Ethos is a pure data pipeline. No user interface at runtime. No LLM calls. No external services required. It runs entirely on SQLite and the Python standard library.
+Ethos is a pure data pipeline. No user interface at runtime. It runs entirely on SQLite and the Python standard library. The optional comprehension panel (off by default) calls the DigitalOcean Gradient API for three-model majority-vote signal verification; all other layers require no external services.
 
 Two databases:
 
@@ -50,7 +50,7 @@ Two databases:
 | `data/documents.db` | Ingested passages — the source corpus |
 | `data/values.db` | Extracted signals, value registry, figure metadata |
 
-The pipeline is designed around a single invariant: **extraction is reproducible**. Given the same source text and the same thresholds, the output is identical every time. No randomness, no model variance.
+The pipeline is designed around a core invariant: **base extraction is reproducible**. Given the same source text and the same thresholds, the keyword/semantic/structural/phrase layers produce identical output every time. The optional comprehension panel introduces model-dependent variance when enabled; base pipeline reproducibility is preserved for runs without the panel.
 
 ### Component Map
 
@@ -59,8 +59,17 @@ cli/ingest.py          — user-facing entry point: segment + store + extract
     ↓
 core/document_store.py — passage storage (documents.db)
     ↓
-core/value_extractor.py — keyword scan + resistance scoring
+core/value_extractor.py — multi-layer extraction loop
+    ├── L1   core/value_extractor.py  — keyword scan, disambiguation, APY detection
+    ├── L1b  core/lexicon_layer.py    — MFD2.0 + MoralStrength lexicons
+    ├── L1c  core/phrase_layer.py     — pronoun-aware agency detection
+    ├── L2   core/semantic_store.py   — BGE-large embeddings vs 322 seed prototypes
+    ├── L3a  core/structural_layer.py — adversity/agency/resistance/stakes regex
+    ├── L3b  core/structural_layer.py — DeBERTa zero-shot entailment
+    ├── L3c  core/mft_classifier.py   — MoralFoundationsClassifier (RoBERTa)
+    ├── [panel] core/comprehension_panel.py — 3-model majority vote (optional)
     ├── core/resistance.py    — resistance formula (doc_type + significance + text markers)
+    ├── core/polarity_layer.py — two-axis polarity scoring (+1/0/-1)
     └── core/value_store.py   — observation + registry persistence (values.db)
     ↓
 cli/export.py          — read value_observations → P1/P0/APY classification → JSONL
@@ -509,13 +518,15 @@ This makes action-sourced examples count 1.5× as much in downstream training �
 
 ## 10. Design Principles
 
-### No LLM in the extraction stack
+### Deterministic base extraction
 
-All classification is keyword regex + SQLite arithmetic. This makes extraction:
-- Deterministic — same input, same output every time
-- Auditable — every classification decision is traceable to a specific rule
-- Fast — runs in milliseconds, no API calls, no rate limits
-- Independent — no model dependency, no API key required
+The L1–L3c layers are keyword regex + SQLite arithmetic + fixed-weight ML models. This makes base extraction:
+- Deterministic — same input, same output every time (panel disabled)
+- Auditable — every classification decision is traceable to a specific rule via `source` chain
+- Fast — runs in milliseconds for deterministic layers
+- Independent — no API key required for base operation
+
+The comprehension panel is an optional post-extraction verification layer that introduces LLM calls, but only when explicitly enabled. It never modifies the base extraction path — it filters and annotates the signal list after all deterministic layers have completed.
 
 ### The spectrum must be complete
 
@@ -545,7 +556,14 @@ A figure can be ingested from multiple source files, multiple document types, ac
 | `core/document_store.py` | Passage storage | `get_document_store()`, `DocumentStore` |
 | `core/value_store.py` | Value persistence | `get_value_store()`, `ValueStore` |
 | `core/resistance.py` | Resistance scoring | `compute_resistance(text, significance, doc_type)` |
-| `core/value_extractor.py` | Extraction loop | `process_figure(session_id)`, `extract_value_signals(...)`, `VALUE_VOCAB`, `_DISQUALIFIERS` |
+| `core/value_extractor.py` | Multi-layer extraction loop | `process_figure(session_id)`, `extract_value_signals(...)`, `VALUE_VOCAB`, `_DISQUALIFIERS` |
+| `core/lexicon_layer.py` | MFD2.0 + MoralStrength lexicons (L1b) | `scan_passage(text)` |
+| `core/phrase_layer.py` | Pronoun-aware agency detection (L1c) | `analyze_agency(text, figure_name)` |
+| `core/semantic_store.py` | BGE-large embedding layer (L2) | `query_points(text, top_k)`, `build_prototypes()` |
+| `core/structural_layer.py` | Structural patterns + zero-shot DeBERTa (L3a/L3b) | `structural_score(text)`, `zeroshot_scores(text, hypotheses)` |
+| `core/mft_classifier.py` | MoralFoundationsClassifier (L3c) | `classify(text)` |
+| `core/polarity_layer.py` | Two-axis polarity scoring | `score_polarity(text, value_name)` |
+| `core/comprehension_panel.py` | Three-model majority-vote verification (optional) | `verify_signals(text, figure_name, signals, enabled)`, `is_available()` |
 | `cli/ingest.py` | Ingestion CLI | `ingest(...)`, `segment_text(...)` |
 | `cli/export.py` | Export CLI | `export(...)`, `classify_observation(...)`, `build_training_records(...)`, `_compute_cooccurrence(...)`, `_detect_tensions(...)` |
 
@@ -583,13 +601,14 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 
 | Invariant | Rule |
 |-----------|------|
-| No LLM call | Extraction is pure Python keyword/regex + SQLite arithmetic. No model dependency. |
-| Deterministic output | Same input + same thresholds = identical output. No randomness. |
+| Deterministic base extraction | L1–L3c layers are pure Python keyword/regex/SQLite arithmetic + fixed-weight ML models. No randomness. Same input + same thresholds = identical output (panel disabled). |
+| Optional LLM verification | The comprehension panel is an opt-in post-extraction layer (`cfg.comprehension_panel_enabled = False`). It never mutates the base extraction path and is fail-open. |
 | Append-only observations | `value_observations` is never updated or deleted. Only appended. |
 | Watermark continuity | Processing never repeats. Watermarks advance monotonically. |
-| Fail-open | `process_figure()` never raises. All write failures log at WARNING; read failures at DEBUG — both with `exc_info=True`. |
+| Fail-open | `process_figure()` never raises. Panel failures return original signals unchanged. All write failures log at WARNING; read failures at DEBUG — both with `exc_info=True`. |
 | No pre-labeling | No figure is labeled positive or negative at ingestion. Classification emerges from the data. |
 | Doc-type transparency | Document type is recorded at ingestion and flows through to every output field. Authenticity weighting is explicit, not implicit. |
+| Source chain auditability | `value_observations.source` records every layer that contributed to a signal (e.g. `keyword+semantic+zeroshot+panel`). Every classification decision is traceable to its origin layers. |
 
 ---
 
@@ -652,6 +671,26 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 - [x] `cli/corpus_stats.py` — human-readable + JSON corpus report
 - [x] `cli/dataset_card.py` — HuggingFace-compatible dataset card auto-generation
 - [x] `core/value_store.py` multi-file fix: `passage_count` accumulates across ingests; mixed `doc_type` auto-detected
+
+### Phrase Layer (L1c) ✅ (2026-03-17)
+- [x] `core/phrase_layer.py` — pronoun-aware subject/object resolution; agency detection
+- [x] First-person agency boost on `disambiguation_confidence`; third-person/passive reduced weight
+- [x] `action` doc_type bypass — biographical third-person framing valid for action sources
+
+### Polarity Layer ✅ (2026-03-17)
+- [x] `core/polarity_layer.py` — three-tier polarity: target lexicon → MFT vice/virtue → optional zero-shot
+- [x] `value_observations.value_polarity` column (+1/0/−1) + `polarity_confidence`
+- [x] Vice signals from L1b lexicon now flow as P0-candidate observations
+
+### Comprehension Panel ✅ (2026-03-18)
+- [x] `core/comprehension_panel.py` — three-model majority vote (≥2/3) for signal verification
+- [x] Binary Q1/Q2 per value per passage; verdicts: P1, P0, tension, discard, skip
+- [x] DigitalOcean Gradient API (`gradient` SDK, `MODEL_ACCESS_KEY`)
+- [x] Models: `openai-gpt-oss-120b`, `deepseek-r1-distill-llama-70b`, `openai-gpt-oss-20b`
+- [x] Async parallel calls via `asyncio.to_thread`; fail-open at every error boundary
+- [x] Source chain: `+panel` appended to `value_observations.source` for verified signals
+- [x] `tests/test_comprehension_panel.py` — 42 tests
+- [x] 934 tests passing total
 
 ### Phase 7 — SRL Integration 💡
 - [ ] Port `modules/srl/` from AiMe: claim_extractor, ric_gate, trait_compiler

@@ -868,6 +868,21 @@ def _run_extraction(session_id: str) -> int:
                     })
                     merged_values.add(vname)
 
+        # Comprehension panel — three-model signal verification (optional)
+        # Runs after all L1-L3c layers so the full merged signal list is available.
+        # Fail-open: panel failures leave merged unchanged.
+        if cfg.comprehension_panel_enabled and merged:
+            try:
+                from core.comprehension_panel import verify_signals as _panel_verify
+                merged = _panel_verify(
+                    text=text,
+                    figure_name=_figure_name,
+                    signals=merged,
+                    enabled=True,
+                )
+            except Exception:
+                pass  # panel failure is non-fatal
+
         # Phase 3 — apply temporal/translation calibration to all signal confidences
         if source_auth < 1.0 or pub_year_val is not None:
             from core.temporal_layer import calibrate_confidence, pub_year_discount
@@ -936,6 +951,7 @@ def _run_extraction(session_id: str) -> int:
                     doc_type=doc_type,
                     value_polarity=polarity,
                     polarity_confidence=pol_conf,
+                    source=sig.get("source", ""),
                 )
                 val_store.upsert_registry(
                     session_id=session_id,

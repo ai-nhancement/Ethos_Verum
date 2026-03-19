@@ -9,7 +9,7 @@ Ethos extracts behavioral evidence of human values from historical documents and
 - **Three-class labeling** — P1 (held under resistance), P0 (failed), APY (Answer-Pressure Yield — abandoned under pressure)
 - **Spectrum principle** — signal extracted from the full human spectrum, not just saints or villains
 
-No generative LLM calls in the core extraction path. The keyword, lexicon, and structural layers are fully deterministic. The semantic (BGE embeddings) and zero-shot classifier layers are deterministic given fixed model weights; exact reproducibility requires pinning `sentence-transformers` and `transformers` package versions and using consistent GPU/CPU precision.
+The keyword, lexicon, structural, and phrase layers are fully deterministic. The semantic (BGE embeddings) and zero-shot classifier layers are deterministic given fixed model weights; exact reproducibility requires pinning `sentence-transformers` and `transformers` package versions and using consistent GPU/CPU precision. An optional **comprehension panel** — three-model majority-vote verification via DigitalOcean Gradient API — can be enabled for post-extraction signal verification; it is off by default and the pipeline degrades gracefully without it.
 
 ---
 
@@ -112,18 +112,20 @@ Text is segmented into passages (min 30 chars). Each passage is stored in `data/
 
 ### 2. Extraction (multi-layer)
 
-Each passage runs through up to four independent layers:
+Each passage runs through up to seven independent layers:
 
 | Layer | Component | Dependency |
 |-------|-----------|------------|
 | L1 — Keywords | `value_extractor.py` — 15 values, context disambiguation, APY pressure detection | stdlib only |
 | L1b — Lexicons | `lexicon_layer.py` — MFD2.0 (2,041 entries) + MoralStrength (452 entries) | bundled |
+| L1c — Phrase | `phrase_layer.py` — pronoun-aware subject/object resolution, agency detection | stdlib only |
 | L2 — Semantic | `semantic_store.py` — BGE-large-en-v1.5 embeddings against 322 seed prototypes | optional |
 | L3a — Structural | `structural_layer.py` — tiered adversity/agency/resistance/stakes regex | stdlib only |
 | L3b — Zero-shot | DeBERTa zero-shot entailment against per-value hypotheses | optional |
 | L3c — MFT | MoralFoundationsClassifier — 10 MFT labels → Ethos value mapping | optional |
+| Panel — Verification | `comprehension_panel.py` — three-model majority vote (DigitalOcean Gradient API) | optional |
 
-The pipeline degrades gracefully: if ML dependencies are absent, L1+L1b+L3a run on stdlib alone.
+The pipeline degrades gracefully: if ML dependencies are absent, L1+L1b+L1c+L3a run on stdlib alone. The comprehension panel is off by default (`cfg.comprehension_panel_enabled = False`) and requires a `MODEL_ACCESS_KEY` environment variable.
 
 ### 3. Resistance scoring
 
@@ -160,7 +162,7 @@ integrity · courage · compassion · commitment · patience · responsibility �
 
 ```bash
 pytest tests/ -q
-# 583 passed
+# 934 passed
 ```
 
 ---
@@ -171,7 +173,7 @@ pytest tests/ -q
 core/           pipeline modules (extraction, storage, scoring)
 cli/            command-line entry points
 api/            FastAPI REST service
-tests/          583 tests
+tests/          934 tests
 data/           SQLite databases + bundled lexicons
 samples/        example manifest and test figures
 ```

@@ -73,7 +73,10 @@ class ValueStore:
                 significance              REAL NOT NULL DEFAULT 0.0,
                 resistance                REAL NOT NULL DEFAULT 0.5,
                 disambiguation_confidence REAL NOT NULL DEFAULT 1.0,
-                doc_type                  TEXT NOT NULL DEFAULT 'unknown'
+                doc_type                  TEXT NOT NULL DEFAULT 'unknown',
+                value_polarity            INTEGER NOT NULL DEFAULT 0,
+                polarity_confidence       REAL NOT NULL DEFAULT 0.0,
+                source                    TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_vobs_session
                 ON value_observations(session_id, ts);
@@ -155,6 +158,9 @@ class ValueStore:
             "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE figure_sources ADD COLUMN pronoun TEXT NOT NULL DEFAULT 'unknown'",
+            "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE value_observations ADD COLUMN source TEXT NOT NULL DEFAULT ''",
         ):
             try:
                 conn.execute(_migration)
@@ -180,17 +186,14 @@ class ValueStore:
         doc_type: str = "unknown",
         value_polarity: int = 0,
         polarity_confidence: float = 0.0,
+        source: str = "",
     ) -> str:
         """
         Record a single value observation.
 
         value_polarity:    +1 = constructive, -1 = destructive, 0 = ambiguous.
-          Polarity is independent of resistance — it captures the moral
-          direction of the value expression, not the cost of holding it.
         polarity_confidence: [0.0, 1.0] — confidence in the polarity detection.
-          A polarity of +1 with confidence 0.12 should be weighted differently
-          from one with confidence 0.85. Stored so downstream consumers can
-          apply their own confidence thresholds.
+        source: pipeline layers that contributed (e.g. "keyword+lexicon+panel").
         """
         try:
             conn = self._conn()
@@ -207,12 +210,13 @@ class ValueStore:
                 """INSERT INTO value_observations
                    (id, session_id, turn_id, record_id, ts, value_name,
                     text_excerpt, significance, resistance, disambiguation_confidence,
-                    doc_type, value_polarity, polarity_confidence)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    doc_type, value_polarity, polarity_confidence, source)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (uid, session_id, turn_id, record_id, ts, value_name,
                  text_excerpt[:200], float(significance), float(resistance),
                  float(disambiguation_confidence), str(doc_type or "unknown"),
-                 int(value_polarity), float(max(0.0, min(1.0, polarity_confidence)))),
+                 int(value_polarity), float(max(0.0, min(1.0, polarity_confidence))),
+                 str(source or "")),
             )
             conn.commit()
             return uid
