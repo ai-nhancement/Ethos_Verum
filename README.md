@@ -1,16 +1,18 @@
 <p align="center">
-  <img src="ethos_logo.png" alt="Ethos" width="400">
+  <img src="ethos_logo.png" alt="Ethos" width="350">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="verum_logo.png" alt="Verum" width="350">
 </p>
 
-<h1 align="center">Ethos</h1>
+<h1 align="center">Ethos + Verum</h1>
 
 <p align="center">
-  <strong>Universal Value Extraction Pipeline</strong><br>
-  <em>What integrity looks like, extracted from the full human record.</em>
+  <strong>Extract what integrity looks like. Certify what meets the standard.</strong>
 </p>
 
 <p align="center">
-  <a href="VERUM.md"><img src="https://img.shields.io/badge/certification-Verum-2ea44f?style=for-the-badge" alt="Verum"></a>
+  <a href="#how-it-works"><img src="https://img.shields.io/badge/Ethos-extraction_pipeline-604020?style=for-the-badge" alt="Ethos"></a>
+  <a href="VERUM.md"><img src="https://img.shields.io/badge/Verum-certification_layer-2ea44f?style=for-the-badge" alt="Verum"></a>
   <a href="API_REFERENCE.md"><img src="https://img.shields.io/badge/docs-API_Reference-604020?style=for-the-badge" alt="API Reference"></a>
   <a href="#the-15-values"><img src="https://img.shields.io/badge/values-15-8B6914?style=for-the-badge" alt="15 Values"></a>
   <a href="#testing"><img src="https://img.shields.io/badge/tests-934_passing-C0834D?style=for-the-badge" alt="934 Tests"></a>
@@ -18,9 +20,9 @@
 
 ---
 
-Ethos extracts behavioral evidence of human values from historical documents and produces labeled training data for AI alignment research.
+**Ethos** extracts behavioral evidence of human values from historical documents and produces labeled training data for AI alignment research. **Verum** scores and certifies whether text demonstrates those values under pressure.
 
-A value stated in comfort is weak signal. A value demonstrated at personal cost, under threat, under pressure, against interest, is strong signal. Ethos measures that cost.
+A value stated in comfort is weak signal. A value demonstrated at personal cost, under threat, under pressure, against interest, is strong signal. Ethos measures that cost. Verum certifies it.
 
 ---
 
@@ -292,22 +294,16 @@ pytest tests/ -q
 
 ---
 
-## Verum
-
-Ethos ships with **Verum**, a value alignment scoring and certification layer.
-
-Verum measures how consistently text demonstrates value-aligned behavior under pressure, not just in comfortable assertions. Certificates are deterministic, SHA-256 signed, and include all threshold parameters so they cannot be reissued with lenient settings to produce the same signature.
-
-See the [Verum documentation](VERUM.md) for details.
-
----
-
 ## About
 
-Ethos was built by [ai-nhancement](https://github.com/ai-nhancement) as part of the AiMe project ecosystem.
+Ethos and Verum were built by [ai-nhancement](https://github.com/ai-nhancement) as part of the AiMe project ecosystem.
 
-- **[AiMe](https://github.com/ai-nhancement/AiMe-public)** governs how AI relates to a person
-- **Ethos** defines what integrity looks like from the human record
-- **Verum** measures whether AI output meets that standard
+| Product | Role |
+|---------|------|
+| **[AiMe](https://github.com/ai-nhancement/AiMe-public)** | How AI relates to a person |
+| **Ethos** | What integrity looks like, extracted from the human record |
+| **Verum** | Whether AI output meets that standard |
+
+Ethos is the foundation. Verum is what you build on top of it. See the [full Verum documentation](VERUM.md) for the scoring formula, certification flow, and API.
 
 > *"A value stated in comfort is weak signal. A value demonstrated at personal cost is strong signal."*
