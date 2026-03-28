@@ -1,19 +1,137 @@
-# Ethos — Universal Value Extraction Pipeline
+<p align="center">
+  <img src="ethos_logo.png" alt="Ethos" width="400">
+</p>
 
-Ethos extracts behavioral evidence of human values from historical documents and produces labeled training data for AI alignment research.
+<h1 align="center">Ethos</h1>
 
-**Core claim:** A value stated in comfort is weak signal. A value demonstrated at personal cost — under threat, under pressure, against interest — is strong signal. Ethos measures that cost.
+<p align="center">
+  <strong>Universal Value Extraction Pipeline</strong><br>
+  <em>What integrity looks like, extracted from the full human record.</em>
+</p>
 
-**Novel contributions:**
-- **Resistance score** — quantifies the evidential weight of holding a value in context (doc type × significance × text markers)
-- **Three-class labeling** — P1 (held under resistance), P0 (failed), APY (Answer-Pressure Yield — abandoned under pressure)
-- **Spectrum principle** — signal extracted from the full human spectrum, not just saints or villains
-
-The keyword, lexicon, structural, and phrase layers are fully deterministic. The semantic (BGE embeddings) and zero-shot classifier layers are deterministic given fixed model weights; exact reproducibility requires pinning `sentence-transformers` and `transformers` package versions and using consistent GPU/CPU precision. An optional **comprehension panel** — three-model majority-vote verification via DigitalOcean Gradient API — can be enabled for post-extraction signal verification; it is off by default and the pipeline degrades gracefully without it.
+<p align="center">
+  <a href="VERUM.md"><img src="https://img.shields.io/badge/certification-Verum-2ea44f?style=for-the-badge" alt="Verum"></a>
+  <a href="API_REFERENCE.md"><img src="https://img.shields.io/badge/docs-API_Reference-604020?style=for-the-badge" alt="API Reference"></a>
+  <a href="#the-15-values"><img src="https://img.shields.io/badge/values-15-8B6914?style=for-the-badge" alt="15 Values"></a>
+  <a href="#testing"><img src="https://img.shields.io/badge/tests-934_passing-C0834D?style=for-the-badge" alt="934 Tests"></a>
+</p>
 
 ---
 
-## Quickstart
+Ethos extracts behavioral evidence of human values from historical documents and produces labeled training data for AI alignment research.
+
+A value stated in comfort is weak signal. A value demonstrated at personal cost, under threat, under pressure, against interest, is strong signal. Ethos measures that cost.
+
+---
+
+## What Makes This Different
+
+Most value-alignment work in AI is built on shaky ground:
+
+- Human preference rankings capture what people *say* they value, not what they *do*
+- Synthetic datasets are another model's opinion dressed up as ground truth
+- RLHF measures preference, not principle
+- Constitutional AI encodes rules from the top down, not evidence from the bottom up
+
+Ethos goes to the source: documented human behavior under real conditions. The resistance score measures what nobody else is measuring systematically, the cost of holding a value when it would be easier not to.
+
+When Ethos flags a value signal, the answer to "why?" traces back to a real person, a real moment, and a real cost.
+
+---
+
+## The 15 Values
+
+| Value | What it means in practice |
+|-------|--------------------------|
+| **Integrity** | Honest and truthful. Says what is real, refuses deception even at cost to self. |
+| **Courage** | Acts despite fear. Faces difficulty, speaks unpopular truths, accepts loss. |
+| **Compassion** | Responds to suffering. Prioritizes others' wellbeing over personal convenience. |
+| **Resilience** | Continues through adversity. Rebuilds after failure, does not stop when it is hard. |
+| **Patience** | Waits without forcing. Allows things to unfold at the pace they require. |
+| **Humility** | Acknowledges limitation. Defers when others know better, gives credit, admits error. |
+| **Fairness** | Applies consistent standards. No favoritism, same measure for all parties. |
+| **Loyalty** | Keeps faith with commitments and people. Does not abandon under pressure. |
+| **Responsibility** | Owns outcomes. Accepts consequences, does not deflect, stays to the end. |
+| **Growth** | Transforms through experience. Allows past errors to change present understanding. |
+| **Independence** | Acts on own judgment. Does not require permission to do what conscience demands. |
+| **Curiosity** | Pursues understanding. Follows questions past convenience. |
+| **Commitment** | Sees things through. Stays when it costs something. |
+| **Love** | Acts for others' wellbeing. Prioritizes the beloved over self. |
+| **Gratitude** | Recognizes what was given. Carries the debt of others' generosity forward. |
+
+---
+
+## How It Works
+
+### 1. Ingestion
+
+Text is segmented into sentence-bounded passages. Each passage is stored with metadata:
+
+- **Document type** (journal, letter, speech, action) affects resistance scoring. Private writing scores higher than public speech. Documented behavior scores highest.
+- **Source authenticity** tracks whether the text is original (1.0), translated (0.85), or uncertain (0.70).
+- **Publication year** drives a temporal discount for archaic texts.
+
+### 2. Multi-Layer Extraction
+
+Each passage runs through up to seven independent extraction layers:
+
+| Layer | What it does | Requires |
+|-------|-------------|----------|
+| **L1 Keywords** | 15 value vocabularies with context disambiguation | Nothing (stdlib) |
+| **L1b Lexicons** | MFD2.0 (2,041 entries) + MoralStrength (452 entries) | Bundled data |
+| **L1c Phrase** | Pronoun-aware agency detection | Nothing (stdlib) |
+| **L2 Semantic** | BGE-large-en-v1.5 embeddings against 322 prototypes | sentence-transformers |
+| **L3a Structural** | Adversity, agency, resistance, and stakes patterns | Nothing (stdlib) |
+| **L3b Zero-shot** | DeBERTa entailment against per-value hypotheses | transformers |
+| **L3c MFT** | Moral Foundations Theory classification (10 labels) | transformers |
+
+The pipeline degrades gracefully. If ML dependencies are absent, the keyword, lexicon, phrase, and structural layers run on stdlib alone. Each layer is independent. Agreement across layers strengthens confidence.
+
+### 3. Resistance Scoring
+
+```
+resistance = base + significance_bonus + doc_type_bonus + text_tier_bonus
+```
+
+Text tier bonuses are awarded based on what the passage contains:
+
+| Tier | Trigger | Bonus |
+|------|---------|-------|
+| **A: Mortal Stakes** | Death, execution, "I would rather die" | +0.62 |
+| **B: High Adversity** | Imprisonment, exile, persecution, direct threats | +0.36 |
+| **C: Standard Adversity** | "despite", "even though", "scared but", "at a cost" | +0.24 |
+
+**Hold markers** ("nevertheless", "stood firm", "refused to yield") add +0.05 per tier.
+**Failure markers** ("gave in", "surrendered", "backed down") suppress Tiers B and C.
+
+### 4. Classification
+
+Each observation receives a label:
+
+| Label | Meaning | Threshold |
+|-------|---------|-----------|
+| **P1** | Value held under meaningful resistance | resistance >= 0.55 |
+| **P0** | Value failed or corrupted | resistance <= 0.35 |
+| **APY** | Answer-Pressure Yield: abandoned under external pressure | Pressure markers + failure |
+| **AMBIGUOUS** | Between thresholds, insufficient evidence either way | 0.35 < resistance < 0.55 |
+
+### 5. Registry Weight
+
+The strength of a value in a figure's profile:
+
+```
+weight = demonstrations x avg_significance x avg_resistance x consistency
+```
+
+Consistency is a 4-component score:
+- **Volume** (30%): saturates at 10 observations
+- **Resistance stability** (30%): low variance in resistance scores
+- **Temporal spread** (25%): observations spread over time
+- **Source diversity** (15%): multiple document types
+
+---
+
+## Quick Start
 
 **Requirements:** Python 3.10+
 
@@ -24,141 +142,136 @@ pip install -r requirements.txt
 ### Ingest a figure
 
 ```bash
-# Ingest from a UTF-8 text file
-python -m cli.ingest --figure gandhi --file path/to/gandhi.txt --doc-type journal
+python -m cli.ingest --figure gandhi --file gandhi_journal.txt \
+    --doc-type journal --pronoun he
+
+# With translation penalty and publication year
+python -m cli.ingest --figure seneca --file seneca_letters.txt \
+    --doc-type letter --pub-year 65 --translation --pronoun he
 
 # Preview segmentation without writing
-python -m cli.ingest --figure lincoln --file path/to/lincoln.txt --doc-type speech --dry-run
-
-# Historical document with translation penalty
-python -m cli.ingest --figure seneca --file path/to/seneca.txt \
-    --doc-type letter --pub-year 65 --translation
+python -m cli.ingest --figure lincoln --file lincoln_speech.txt \
+    --doc-type speech --pronoun he --dry-run
 ```
-
-**`--doc-type`** options: `journal` · `letter` · `speech` · `action` · `unknown`
-
-Higher-authenticity types (`action`, `journal`) produce higher base resistance scores.
 
 ### Export labeled training data
 
 ```bash
-# Export all figures to output/ric/
+# Export all figures
 python -m cli.export
 
 # With quality filters
 python -m cli.export --min-consistency 0.3 --min-observations 3
 
-# Single figure
-python -m cli.export --figure gandhi
-
-# Dry run (stats only, no files)
-python -m cli.export --dry-run
+# Single figure, dry run
+python -m cli.export --figure gandhi --dry-run
 ```
 
-Output is JSONL with P1/P0/APY labels, resistance scores, source metadata, and value weights.
+Output is JSONL with P1/P0/APY labels, resistance scores, and source metadata.
 
-### Batch ingestion from a manifest
+### Batch ingestion
 
 ```bash
 python -m cli.batch_ingest --manifest samples/manifest_example.json
 ```
 
-See `samples/manifest_example.json` for the manifest format.
-
 ### Corpus statistics
 
 ```bash
-# Human-readable report
 python -m cli.corpus_stats
-
-# JSON output
 python -m cli.corpus_stats --json
-
-# HuggingFace dataset card
-python -m cli.dataset_card
+python -m cli.dataset_card    # HuggingFace format
 ```
 
-### REST API
+### Start the API
 
 ```bash
 python -m api.server
-# Server starts at http://localhost:8000
+# http://localhost:8000
+# Interactive docs at http://localhost:8000/docs
 ```
 
-Key endpoints:
+---
+
+## API Endpoints
+
+### Ethos
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/figures/{name}/ingest` | Ingest text for a figure |
 | `GET` | `/figures` | List all ingested figures |
 | `GET` | `/figures/{name}/profile` | Value profile for a figure |
-| `GET` | `/figures/universal` | Cross-figure value aggregate |
+| `GET` | `/figures/universal` | Cross-figure aggregate |
 | `POST` | `/export/ric` | Export labeled training data |
 | `GET` | `/health` | Health check |
 
-Interactive docs at `http://localhost:8000/docs`.
+### Verum (integrated)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/verum/values` | List all 15 values with descriptions |
+| `POST` | `/verum/score` | Score a text for value alignment |
+| `POST` | `/verum/certify` | Issue a signed certificate |
+| `GET` | `/verum/certificate/{cert_id}` | Retrieve a certificate |
+| `GET` | `/verum/certificates` | List certificates |
 
 ---
 
-## How it works
+## Training Data Format
 
-### 1. Ingestion
+Each exported record is a JSONL line:
 
-Text is segmented into passages (min 30 chars). Each passage is stored in `data/documents.db` with:
-- `doc_type` — affects the resistance formula
-- `source_lang` — auto-detected via langdetect
-- `source_authenticity` — 1.0 (original) / 0.85 (known translation) / 0.70 (uncertain)
-- `pub_year` — drives a temporal discount (pre-1400 texts discounted to 0.70×)
-
-### 2. Extraction (multi-layer)
-
-Each passage runs through up to seven independent layers:
-
-| Layer | Component | Dependency |
-|-------|-----------|------------|
-| L1 — Keywords | `value_extractor.py` — 15 values, context disambiguation, APY pressure detection | stdlib only |
-| L1b — Lexicons | `lexicon_layer.py` — MFD2.0 (2,041 entries) + MoralStrength (452 entries) | bundled |
-| L1c — Phrase | `phrase_layer.py` — pronoun-aware subject/object resolution, agency detection | stdlib only |
-| L2 — Semantic | `semantic_store.py` — BGE-large-en-v1.5 embeddings against 322 seed prototypes | optional |
-| L3a — Structural | `structural_layer.py` — tiered adversity/agency/resistance/stakes regex | stdlib only |
-| L3b — Zero-shot | DeBERTa zero-shot entailment against per-value hypotheses | optional |
-| L3c — MFT | MoralFoundationsClassifier — 10 MFT labels → Ethos value mapping | optional |
-| Panel — Verification | `comprehension_panel.py` — three-model majority vote (DigitalOcean Gradient API) | optional |
-
-The pipeline degrades gracefully: if ML dependencies are absent, L1+L1b+L1c+L3a run on stdlib alone. The comprehension panel is off by default (`cfg.comprehension_panel_enabled = False`) and requires a `MODEL_ACCESS_KEY` environment variable.
-
-### 3. Resistance scoring
-
+```json
+{
+  "figure": "gandhi",
+  "value_name": "integrity",
+  "text_excerpt": "...was immense, but I still believed that truth mattered more...",
+  "document_type": "journal",
+  "significance": 0.90,
+  "resistance": 1.0,
+  "label": "P1",
+  "label_reason": "high_resistance_hold_marker",
+  "training_weight": 1.26,
+  "confidence": 0.90,
+  "hold_markers": ["still", "despite"],
+  "failure_markers": [],
+  "disambiguation_confidence": 1.0,
+  "observation_consistency": 0.85
+}
 ```
-resistance = doc_type_base + significance_component + text_marker_bonus
-```
-
-`action` documents (behavior recorded by observers) carry a higher base resistance than `speech` (stated in public). Structural adversity patterns (e.g. "refused to yield despite threat of execution") apply a text marker bonus.
-
-### 4. Classification and export
-
-Each observation is classified:
-- **P1** — resistance ≥ p1_threshold (default 0.55) — value held under cost
-- **P0** — resistance ≤ p0_threshold (default 0.35) — value failed
-- **APY** — pressure detected in a preceding passage window, value then failed — yielded under pressure
-- **AMBIGUOUS** — between thresholds
-
-The registry weight formula:
-```
-weight = demonstrations × avg_significance × avg_resistance × consistency
-```
-
-where `consistency` encodes observation volume, resistance stability, temporal spread, and source diversity.
 
 ---
 
-## 15 extracted values
+## Design Principles
 
-integrity · courage · compassion · commitment · patience · responsibility · fairness · gratitude · curiosity · resilience · love · growth · independence · loyalty · humility
+1. **Behavioral evidence over hypotheticals.** Extract from documented history, not surveys or preferences.
+2. **Cost-weighted signal.** High resistance = high informational value. A value demonstrated under threat is worth more than a value stated in comfort.
+3. **Document authenticity calibration.** Private writing > public speech. Observed behavior > stated belief.
+4. **Deterministic reproducibility.** No randomness. Same input + same weights = same output.
+5. **Multi-layer convergence.** Agreement from independent extraction layers = strong evidence.
+6. **Spectrum principle.** Signal extracted from the full human range, not just heroes or villains.
+7. **No LLM calls at base layer.** The optional comprehension panel is off by default.
+8. **Append-only observations.** The historical record is immutable once written.
 
 ---
 
-## Running tests
+## Project Structure
+
+```
+core/           Extraction pipeline, storage, scoring (22 modules)
+cli/            Command-line tools (ingest, export, batch, stats)
+api/            FastAPI REST service + Verum endpoints
+tests/          934 tests
+data/           SQLite databases + bundled lexicons
+samples/        Example manifests and test figures
+static/         Verum product page
+IP/             Research notes
+```
+
+---
+
+## Testing
 
 ```bash
 pytest tests/ -q
@@ -167,19 +280,34 @@ pytest tests/ -q
 
 ---
 
-## Project structure
+## Documentation
 
-```
-core/           pipeline modules (extraction, storage, scoring)
-cli/            command-line entry points
-api/            FastAPI REST service
-tests/          934 tests
-data/           SQLite databases + bundled lexicons
-samples/        example manifest and test figures
-```
+| Document | Description |
+|----------|-------------|
+| `technical_ethos.md` | Full technical reference: formulas, schema, layer wiring |
+| `technical_verum.md` | Verum technical reference: score formula, certificate signature, API |
+| `OPERATIONS.md` | Operational guide: batch processing, export, API usage |
+| `STATUS_ethos.md` | Phase-by-phase implementation status |
+| `PAPER.md` | Research paper |
 
-Key docs:
-- `STATUS_ethos.md` — phase-by-phase implementation status and design decisions
-- `technical_ethos.md` — technical reference (formulas, schema, layer wiring)
-- `OPERATIONS.md` — operational guide (batch processing, export formats, API usage)
-- `PAPER.md` — research paper
+---
+
+## Verum
+
+Ethos ships with **Verum**, a value alignment scoring and certification layer.
+
+Verum measures how consistently text demonstrates value-aligned behavior under pressure, not just in comfortable assertions. Certificates are deterministic, SHA-256 signed, and include all threshold parameters so they cannot be reissued with lenient settings to produce the same signature.
+
+See the [Verum documentation](VERUM.md) for details.
+
+---
+
+## About
+
+Ethos was built by [ai-nhancement](https://github.com/ai-nhancement) as part of the AiMe project ecosystem.
+
+- **[AiMe](https://github.com/ai-nhancement/AiMe-public)** governs how AI relates to a person
+- **Ethos** defines what integrity looks like from the human record
+- **Verum** measures whether AI output meets that standard
+
+> *"A value stated in comfort is weak signal. A value demonstrated at personal cost is strong signal."*
