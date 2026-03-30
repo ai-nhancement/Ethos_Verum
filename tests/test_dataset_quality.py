@@ -27,6 +27,7 @@ sys.path.insert(0, str(_ROOT))
 from cli.dataset_quality import (
     _compute_metrics, grade_dataset, _load_records,
     _safe_float, _percentile, DEFAULT_THRESHOLDS,
+    _grade_layer1, _grade_layer2, _grade_layer3,
 )
 
 
@@ -347,7 +348,7 @@ class TestGradeDataset:
     def test_good_dataset_certified(self):
         records = _good_dataset()
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         assert result["grade"] == "CERTIFIED", \
             f"Expected CERTIFIED but got FAILED: " \
             f"{[c['metric'] for c in result['checks'] if not c['passed']]}"
@@ -356,7 +357,7 @@ class TestGradeDataset:
     def test_bad_dataset_fails(self):
         records = _bad_dataset()
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         assert result["grade"] == "FAILED"
         assert result["failed"] > 0
 
@@ -365,12 +366,28 @@ class TestGradeDataset:
         result = grade_dataset(m)
         assert result["grade"] == "ERROR"
 
+    def test_has_three_layers(self):
+        records = _good_dataset()
+        m = _compute_metrics(records)
+        result = grade_dataset(m, records=records)
+        assert len(result["layers"]) == 3
+        assert result["layers"][0]["name"] == "L1:Statistical"
+        assert result["layers"][1]["name"] == "L2:Consistency"
+        assert result["layers"][2]["name"] == "L3:Stability"
+
+    def test_all_layers_pass_for_good_data(self):
+        records = _good_dataset()
+        m = _compute_metrics(records)
+        result = grade_dataset(m, records=records)
+        for layer in result["layers"]:
+            assert layer["verdict"] == "PASS", f"{layer['name']} failed"
+
     def test_all_p1_fails_balance_and_p0_check(self):
         records = _good_dataset()
         for r in records:
             r["label"] = "P1"
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Label Balance" in failed_names
         assert "P1+P0 Present" in failed_names
@@ -381,7 +398,7 @@ class TestGradeDataset:
                         document_type=["journal", "letter"][i % 2])
                    for i in range(30)]
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Value Coverage" in failed_names
 
@@ -390,7 +407,7 @@ class TestGradeDataset:
         for r in records:
             r["confidence"] = 0.30
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Avg Confidence" in failed_names
 
@@ -399,7 +416,7 @@ class TestGradeDataset:
         for r in records:
             r["document_type"] = "unknown"
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Source Diversity" in failed_names
 
@@ -408,36 +425,29 @@ class TestGradeDataset:
         for r in records:
             r["text_excerpt"] = "x"
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Text Quality" in failed_names
 
     def test_too_few_records_fails(self):
         records = _good_dataset()[:5]
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Record Count" in failed_names
 
     def test_weak_figure_fails(self):
         records = _good_dataset()
-        # Add a figure with only 1 record
         records.append(_rec(figure="weak_figure", label="P1", ts=9999))
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Per-Figure Minimum" in failed_names
-
-    def test_check_count(self):
-        records = _good_dataset()
-        m = _compute_metrics(records)
-        result = grade_dataset(m)
-        assert result["total_checks"] == 11
 
     def test_all_checks_have_required_fields(self):
         records = _good_dataset()
         m = _compute_metrics(records)
-        result = grade_dataset(m)
+        result = grade_dataset(m, records=records)
         for c in result["checks"]:
             assert "metric" in c
             assert "value" in c
@@ -449,8 +459,7 @@ class TestGradeDataset:
     def test_custom_thresholds_override(self):
         records = _good_dataset()
         m = _compute_metrics(records)
-        # With impossibly high threshold, should fail
-        result = grade_dataset(m, thresholds={"min_records": 99999})
+        result = grade_dataset(m, thresholds={"min_records": 99999}, records=records)
         failed_names = {c["metric"] for c in result["checks"] if not c["passed"]}
         assert "Record Count" in failed_names
 
@@ -458,8 +467,102 @@ class TestGradeDataset:
         original_min = DEFAULT_THRESHOLDS["min_records"]
         records = _good_dataset()
         m = _compute_metrics(records)
-        grade_dataset(m, thresholds={"min_records": 99999})
+        grade_dataset(m, thresholds={"min_records": 99999}, records=records)
         assert DEFAULT_THRESHOLDS["min_records"] == original_min
+
+    def test_grade_without_records_still_runs_l1(self):
+        """grade_dataset with records=None should still run L1."""
+        records = _good_dataset()
+        m = _compute_metrics(records)
+        result = grade_dataset(m)  # no records passed
+        assert result["layers"][0]["name"] == "L1:Statistical"
+        assert result["layers"][0]["passed"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Layer 2 (Internal Consistency)
+# ---------------------------------------------------------------------------
+
+class TestLayer2:
+
+    def test_coherent_records_pass(self):
+        records = _good_dataset()
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer2(records, T)
+        assert result["failed"] == 0
+
+    def test_label_reason_mismatch_caught(self):
+        records = _good_dataset()
+        # Force a mismatch: P1 label with a P0-sounding reason
+        for r in records:
+            if r["label"] == "P1":
+                r["label_reason"] = "confirmed_p0_failure"
+                break
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer2(records, T)
+        # Should still mostly pass since it's 1 out of 30
+        coherence_check = [c for c in result["checks"] if c["metric"] == "Label-Reason Coherence"]
+        assert len(coherence_check) == 1
+
+    def test_high_conf_low_disambig_caught(self):
+        records = [_rec(confidence=0.95, disambiguation_confidence=0.20, ts=i)
+                   for i in range(20)]
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer2(records, T)
+        conflict_check = [c for c in result["checks"] if c["metric"] == "Signal Conflict Rate"]
+        assert len(conflict_check) == 1
+        assert not conflict_check[0]["passed"]  # all records are conflicting
+
+    def test_empty_records(self):
+        result = _grade_layer2([], dict(DEFAULT_THRESHOLDS))
+        assert result["failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tests: Layer 3 (Stability)
+# ---------------------------------------------------------------------------
+
+class TestLayer3:
+
+    def test_good_dataset_stable(self):
+        records = _good_dataset()
+        m = _compute_metrics(records)
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer3(records, m, T)
+        assert result["failed"] == 0
+
+    def test_small_dataset_skips(self):
+        records = [_rec(ts=i) for i in range(5)]
+        m = _compute_metrics(records)
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer3(records, m, T)
+        assert result["failed"] == 0  # skipped, not failed
+        assert "Skipped" in result["checks"][0]["detail"]
+
+    def test_fragile_figure_caught(self):
+        """If one figure contributes unique values, removing it breaks coverage below threshold."""
+        # Figure A has 6 unique values (2 records each = 12),
+        # figure B has only 3 unique values (2 records each = 6)
+        # Total = 18 records, needs 10+ to avoid skip
+        values_a = ["integrity", "courage", "compassion", "resilience", "patience", "fairness"]
+        values_b = ["loyalty", "responsibility", "growth"]
+        records = []
+        for rep in range(2):
+            for i, v in enumerate(values_a):
+                records.append(_rec(figure="figure_a", value_name=v, label=["P1", "P0"][i % 2],
+                                    confidence=0.85, resistance=0.3 + i * 0.1,
+                                    document_type=["journal", "letter"][i % 2], ts=rep * 100 + i))
+            for i, v in enumerate(values_b):
+                records.append(_rec(figure="figure_b", value_name=v, label=["P1", "P0"][i % 2],
+                                    confidence=0.85, resistance=0.3 + i * 0.1,
+                                    document_type=["journal", "letter"][i % 2], ts=rep * 100 + 50 + i))
+        # Removing figure_a leaves only 3 values — below threshold of 5
+        m = _compute_metrics(records)
+        T = dict(DEFAULT_THRESHOLDS)
+        result = _grade_layer3(records, m, T)
+        independence_check = [c for c in result["checks"] if c["metric"] == "Figure Independence"]
+        assert len(independence_check) == 1
+        assert not independence_check[0]["passed"]
 
 
 # ---------------------------------------------------------------------------

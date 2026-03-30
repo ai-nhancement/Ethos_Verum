@@ -293,101 +293,296 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Grade
+# Layer 1: Statistical Shape (grade_layer1)
+# ---------------------------------------------------------------------------
+
+def _check(checks: List[Dict], name: str, value, threshold, op: str = ">=", detail: str = ""):
+    """Append a check result to the checks list."""
+    if op == ">=":
+        passed = value >= threshold
+    elif op == "<=":
+        passed = value <= threshold
+    elif op == "==":
+        passed = value == threshold
+    else:
+        passed = False
+    checks.append({
+        "metric": name, "value": value, "threshold": threshold,
+        "op": op, "passed": passed, "detail": detail,
+    })
+
+
+def _grade_layer1(metrics: Dict[str, Any], T: Dict[str, Any]) -> Dict[str, Any]:
+    """Layer 1: Statistical shape — does the dataset have the right structure?"""
+    checks: List[Dict[str, Any]] = []
+
+    try:
+        _check(checks, "Record Count", metrics["record_count"], T["min_records"],
+               detail=f"{metrics['record_count']} records in dataset")
+
+        _check(checks, "Value Coverage", metrics["value_coverage"], T["value_coverage_min"],
+               detail=f"{metrics['value_coverage']} of 15 values detected: "
+                      f"{', '.join(metrics['values_detected'][:8])}"
+                      f"{'...' if len(metrics['values_detected']) > 8 else ''}")
+
+        _check(checks, "Label Balance", metrics["max_label_pct"], T["label_max_pct"], op="<=",
+               detail=f"Dominant label: {metrics['max_label_name']} at {metrics['max_label_pct']*100:.1f}%")
+
+        both_present = metrics["has_p1"] and metrics["has_p0"]
+        _check(checks, "P1+P0 Present", both_present, True, op="==",
+               detail=f"P1: {metrics['label_counts'].get('P1', 0)}, "
+                      f"P0: {metrics['label_counts'].get('P0', 0)} — "
+                      f"{'both present' if both_present else 'MISSING ' + ('P0' if metrics['has_p1'] else 'P1') + ' signals'}")
+
+        _check(checks, "Avg Confidence", metrics["avg_confidence"], T["avg_confidence_min"],
+               detail=f"Mean classification confidence: {metrics['avg_confidence']:.4f}")
+
+        _check(checks, "Resistance Spread", metrics["resistance_spread"], T["resistance_spread_min"],
+               detail=f"Std dev: {metrics['resistance_spread']:.4f}, mean: {metrics['resistance_mean']:.4f}")
+
+        _check(checks, "Source Diversity", metrics["source_diversity"], T["source_diversity_min"],
+               detail=f"Real document types: {', '.join(metrics['doc_types_real']) or 'none'}"
+                      f"{' (unknown excluded)' if 'unknown' in metrics['doc_types'] else ''}")
+
+        _check(checks, "Disambiguation Rate", metrics["disambiguation_rate"], T["disambiguation_rate_min"],
+               detail=f"{metrics['disambiguation_rate']*100:.1f}% of signals have disambiguation >= 0.8")
+
+        _check(checks, "Consistency Floor", metrics["consistency_pct5"], T["consistency_pct5_min"],
+               detail=f"5th percentile of observation_consistency: {metrics['consistency_pct5']:.4f}")
+
+        _check(checks, "Text Quality", metrics["text_quality_rate"], T["text_quality_rate_min"],
+               detail=f"{metrics['text_quality_rate']*100:.1f}% of records have text_excerpt >= {T['text_quality_min_chars']} chars")
+
+        _check(checks, "Per-Figure Minimum", metrics["min_figure_records"], T["per_figure_min_records"],
+               detail=f"Weakest figure: {metrics['weakest_figure']} with {metrics['min_figure_records']} records")
+
+    except Exception as e:
+        _log.warning("Layer 1 partial failure: %s", e)
+        checks.append({"metric": "Layer 1 Error", "value": str(e), "threshold": "N/A",
+                        "op": "N/A", "passed": False, "detail": f"Unexpected error: {e}"})
+
+    passed = sum(1 for c in checks if c["passed"])
+    failed = sum(1 for c in checks if not c["passed"])
+    return {"layer": "L1:Statistical", "checks": checks, "passed": passed, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: Internal Consistency (grade_layer2)
+# ---------------------------------------------------------------------------
+
+def _grade_layer2(records: List[Dict[str, Any]], T: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Layer 2: Internal consistency — do the numbers within each record agree?
+
+    Checks:
+      - P1 records should have resistance >= p1_threshold (default 0.55)
+        OR hold/pressure markers present (label_reason indicates markers)
+      - P0 records should have resistance < p1_threshold
+        OR failure markers present
+      - Label and label_reason should be consistent
+      - High confidence + low disambiguation = conflicting signal
+    """
+    checks: List[Dict[str, Any]] = []
+    n = len(records)
+    if n == 0:
+        return {"layer": "L2:Consistency", "checks": [], "passed": 0, "failed": 0}
+
+    try:
+        p1_threshold = T.get("p1_resistance_threshold", 0.55)
+
+        # Check 1: P1 records with resistance below threshold and no marker-based reason
+        marker_reasons = {"apy_resistance_held_under_pressure", "high_resistance_hold_marker",
+                          "pressure_detected_value_failed", "panel_confirmed_p1"}
+        p1_records = [r for r in records if r.get("label") == "P1"]
+        if p1_records:
+            p1_low_resistance = sum(
+                1 for r in p1_records
+                if _safe_float(r.get("resistance")) < p1_threshold
+                and r.get("label_reason", "") not in marker_reasons
+            )
+            p1_coherence = 1.0 - (p1_low_resistance / len(p1_records)) if p1_records else 1.0
+            _check(checks, "P1 Resistance Coherence", round(p1_coherence, 4), 0.85,
+                   detail=f"{p1_low_resistance}/{len(p1_records)} P1 records have resistance < {p1_threshold} without marker justification")
+
+        # Check 2: label_reason matches label
+        mismatches = 0
+        for r in records:
+            label = r.get("label", "")
+            reason = r.get("label_reason", "")
+            if not reason:
+                continue
+            if label == "P1" and "p0" in reason.lower() and "pressure" not in reason.lower():
+                mismatches += 1
+            elif label == "P0" and "held" in reason.lower() and "panel" not in reason.lower():
+                mismatches += 1
+            elif label == "APY" and "held" in reason.lower() and "pressure" not in reason.lower():
+                mismatches += 1
+        label_reason_rate = 1.0 - (mismatches / n)
+        _check(checks, "Label-Reason Coherence", round(label_reason_rate, 4), 0.95,
+               detail=f"{mismatches}/{n} records have label/reason mismatches")
+
+        # Check 3: High confidence + low disambiguation (conflicting signals)
+        conflicting = sum(
+            1 for r in records
+            if _safe_float(r.get("confidence")) >= 0.80
+            and _safe_float(r.get("disambiguation_confidence"), 1.0) < 0.50
+        )
+        conflict_rate = conflicting / n
+        _check(checks, "Signal Conflict Rate", round(conflict_rate, 4), 0.05, op="<=",
+               detail=f"{conflicting}/{n} records have high confidence but low disambiguation")
+
+    except Exception as e:
+        _log.warning("Layer 2 partial failure: %s", e)
+        checks.append({"metric": "Layer 2 Error", "value": str(e), "threshold": "N/A",
+                        "op": "N/A", "passed": False, "detail": f"Unexpected error: {e}"})
+
+    passed = sum(1 for c in checks if c["passed"])
+    failed = sum(1 for c in checks if not c["passed"])
+    return {"layer": "L2:Consistency", "checks": checks, "passed": passed, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# Layer 3: Stability (grade_layer3)
+# ---------------------------------------------------------------------------
+
+def _grade_layer3(records: List[Dict[str, Any]], metrics: Dict[str, Any], T: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Layer 3: Stability — is the dataset robust or fragile?
+
+    Checks:
+      - Split-half: both random halves should independently pass Layer 1 core checks
+      - Leave-one-figure-out: removing any single figure shouldn't drop value coverage
+        below threshold
+    """
+    checks: List[Dict[str, Any]] = []
+    n = len(records)
+    if n < 10:
+        checks.append({"metric": "Stability", "value": "N/A", "threshold": "N/A",
+                        "op": "N/A", "passed": True,
+                        "detail": f"Skipped: only {n} records (need >= 10 for stability checks)"})
+        return {"layer": "L3:Stability", "checks": checks, "passed": 1, "failed": 0}
+
+    try:
+        # Check 1: Split-half consistency
+        # Use deterministic split (even/odd by index after sorting) — no randomness
+        sorted_recs = sorted(records, key=lambda r: (
+            r.get("figure", ""), r.get("value_name", ""),
+            r.get("text_excerpt", "")[:40], _safe_float(r.get("ts")),
+        ))
+        half_a = [sorted_recs[i] for i in range(0, n, 2)]
+        half_b = [sorted_recs[i] for i in range(1, n, 2)]
+
+        m_a = _compute_metrics(half_a)
+        m_b = _compute_metrics(half_b)
+
+        halves_ok = True
+        half_issues = []
+
+        for half_name, m_half in [("A", m_a), ("B", m_b)]:
+            if "error" in m_half:
+                halves_ok = False
+                half_issues.append(f"Half {half_name}: error computing metrics")
+                continue
+            if m_half["value_coverage"] < T["value_coverage_min"]:
+                halves_ok = False
+                half_issues.append(f"Half {half_name}: value coverage {m_half['value_coverage']} < {T['value_coverage_min']}")
+            if m_half["avg_confidence"] < T["avg_confidence_min"]:
+                halves_ok = False
+                half_issues.append(f"Half {half_name}: avg confidence {m_half['avg_confidence']:.3f} < {T['avg_confidence_min']}")
+
+        _check(checks, "Split-Half Consistency", halves_ok, True, op="==",
+               detail="; ".join(half_issues) if half_issues else "Both halves pass core checks independently")
+
+        # Check 2: Leave-one-figure-out
+        figure_counts = metrics.get("figure_counts", {})
+        if len(figure_counts) >= 2:
+            fragile_figures = []
+            for fig in figure_counts:
+                remaining = [r for r in records if r.get("figure") != fig]
+                if not remaining:
+                    continue
+                m_remaining = _compute_metrics(remaining)
+                if "error" in m_remaining:
+                    continue
+                if m_remaining["value_coverage"] < T["value_coverage_min"]:
+                    fragile_figures.append(f"{fig} (coverage drops to {m_remaining['value_coverage']})")
+
+            lofo_ok = len(fragile_figures) == 0
+            _check(checks, "Figure Independence", lofo_ok, True, op="==",
+                   detail=f"Fragile on: {', '.join(fragile_figures)}" if fragile_figures
+                   else "No single figure removal breaks value coverage")
+        else:
+            _check(checks, "Figure Independence", True, True, op="==",
+                   detail="Skipped: only 1 figure in dataset")
+
+    except Exception as e:
+        _log.warning("Layer 3 partial failure: %s", e)
+        checks.append({"metric": "Layer 3 Error", "value": str(e), "threshold": "N/A",
+                        "op": "N/A", "passed": False, "detail": f"Unexpected error: {e}"})
+
+    passed = sum(1 for c in checks if c["passed"])
+    failed = sum(1 for c in checks if not c["passed"])
+    return {"layer": "L3:Stability", "checks": checks, "passed": passed, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# Grade (all three layers)
 # ---------------------------------------------------------------------------
 
 def grade_dataset(
     metrics: Dict[str, Any],
     thresholds: Dict[str, Any] | None = None,
+    records: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """
-    Apply thresholds to metrics and return a pass/fail verdict for each.
-    Returns {checks: [...], passed: int, failed: int, grade: "CERTIFIED"|"FAILED"}.
-    Uses DEFAULT_THRESHOLDS unless overridden.
+    Three-layer quality assessment.
+
+    Layer 1 (Statistical Shape): Does the dataset have the right structure?
+    Layer 2 (Internal Consistency): Do individual records agree internally?
+    Layer 3 (Stability): Is the dataset robust to splits and figure removal?
+
+    All three layers must pass for CERTIFIED. Any layer failure = FAILED.
+    Any layer exception = degraded result, not a crash.
     """
     if "error" in metrics:
-        return {"grade": "ERROR", "reason": metrics["error"], "checks": [], "passed": 0, "failed": 1}
+        return {"grade": "ERROR", "reason": metrics["error"], "checks": [],
+                "layers": [], "passed": 0, "failed": 1}
 
     T = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
-    checks: List[Dict[str, Any]] = []
 
-    def check(name: str, value, threshold, op: str = ">=", detail: str = ""):
-        if op == ">=":
-            passed = value >= threshold
-        elif op == "<=":
-            passed = value <= threshold
-        elif op == "==":
-            passed = value == threshold
-        else:
-            passed = False
-        checks.append({
-            "metric": name,
-            "value": value,
-            "threshold": threshold,
-            "op": op,
-            "passed": passed,
-            "detail": detail,
-        })
+    # Run all three layers — each is fault-isolated
+    l1 = _grade_layer1(metrics, T)
+    l2 = _grade_layer2(records or [], T) if records else {
+        "layer": "L2:Consistency", "checks": [], "passed": 0, "failed": 0
+    }
+    l3 = _grade_layer3(records or [], metrics, T) if records else {
+        "layer": "L3:Stability", "checks": [], "passed": 0, "failed": 0
+    }
 
-    # 1. Record Count
-    check("Record Count", metrics["record_count"], T["min_records"],
-          detail=f"{metrics['record_count']} records in dataset")
+    all_checks = l1["checks"] + l2["checks"] + l3["checks"]
+    total_passed = l1["passed"] + l2["passed"] + l3["passed"]
+    total_failed = l1["failed"] + l2["failed"] + l3["failed"]
 
-    # 2. Value Coverage
-    check("Value Coverage", metrics["value_coverage"], T["value_coverage_min"],
-          detail=f"{metrics['value_coverage']} of 15 values detected: "
-                 f"{', '.join(metrics['values_detected'][:8])}"
-                 f"{'...' if len(metrics['values_detected']) > 8 else ''}")
-
-    # 3. Label Distribution (two sub-checks)
-    check("Label Balance", metrics["max_label_pct"], T["label_max_pct"], op="<=",
-          detail=f"Dominant label: {metrics['max_label_name']} at {metrics['max_label_pct']*100:.1f}%")
-
-    both_present = metrics["has_p1"] and metrics["has_p0"]
-    check("P1+P0 Present", both_present, True, op="==",
-          detail=f"P1: {metrics['label_counts'].get('P1', 0)}, "
-                 f"P0: {metrics['label_counts'].get('P0', 0)} — "
-                 f"{'both present' if both_present else 'MISSING ' + ('P0' if metrics['has_p1'] else 'P1') + ' signals'}")
-
-    # 4. Avg Confidence
-    check("Avg Confidence", metrics["avg_confidence"], T["avg_confidence_min"],
-          detail=f"Mean classification confidence: {metrics['avg_confidence']:.4f}")
-
-    # 5. Resistance Spread
-    check("Resistance Spread", metrics["resistance_spread"], T["resistance_spread_min"],
-          detail=f"Std dev: {metrics['resistance_spread']:.4f}, mean: {metrics['resistance_mean']:.4f}")
-
-    # 6. Source Diversity (excluding "unknown")
-    check("Source Diversity", metrics["source_diversity"], T["source_diversity_min"],
-          detail=f"Real document types: {', '.join(metrics['doc_types_real']) or 'none'}"
-                 f"{' (unknown excluded)' if 'unknown' in metrics['doc_types'] else ''}")
-
-    # 7. Disambiguation Rate
-    check("Disambiguation Rate", metrics["disambiguation_rate"], T["disambiguation_rate_min"],
-          detail=f"{metrics['disambiguation_rate']*100:.1f}% of signals have disambiguation >= 0.8")
-
-    # 8. Consistency Floor (5th percentile)
-    check("Consistency Floor", metrics["consistency_pct5"], T["consistency_pct5_min"],
-          detail=f"5th percentile of observation_consistency: {metrics['consistency_pct5']:.4f}")
-
-    # 9. Text Quality
-    check("Text Quality", metrics["text_quality_rate"], T["text_quality_rate_min"],
-          detail=f"{metrics['text_quality_rate']*100:.1f}% of records have text_excerpt >= {T['text_quality_min_chars']} chars")
-
-    # 10. Per-Figure Minimum
-    check("Per-Figure Minimum", metrics["min_figure_records"], T["per_figure_min_records"],
-          detail=f"Weakest figure: {metrics['weakest_figure']} with {metrics['min_figure_records']} records")
-
-    passed = sum(1 for c in checks if c["passed"])
-    failed = sum(1 for c in checks if not c["passed"])
-    grade = "CERTIFIED" if failed == 0 else "FAILED"
+    # All three layers must pass
+    l1_ok = l1["failed"] == 0
+    l2_ok = l2["failed"] == 0
+    l3_ok = l3["failed"] == 0
+    grade = "CERTIFIED" if (l1_ok and l2_ok and l3_ok) else "FAILED"
 
     return {
         "grade": grade,
-        "passed": passed,
-        "failed": failed,
-        "total_checks": len(checks),
-        "checks": checks,
+        "passed": total_passed,
+        "failed": total_failed,
+        "total_checks": len(all_checks),
+        "checks": all_checks,
+        "layers": [
+            {"name": l1["layer"], "passed": l1["passed"], "failed": l1["failed"],
+             "verdict": "PASS" if l1_ok else "FAIL"},
+            {"name": l2["layer"], "passed": l2["passed"], "failed": l2["failed"],
+             "verdict": "PASS" if l2_ok else "FAIL"},
+            {"name": l3["layer"], "passed": l3["passed"], "failed": l3["failed"],
+             "verdict": "PASS" if l3_ok else "FAIL"},
+        ],
         "record_count": metrics["record_count"],
         "reproducibility_hash": metrics["reproducibility_hash"],
     }
@@ -403,7 +598,7 @@ def print_scorecard(result: Dict[str, Any], metrics: Dict[str, Any], warnings: L
 
     print()
     print("=" * 68)
-    print("  DATASET QUALITY SCORECARD")
+    print("  DATASET QUALITY SCORECARD — THREE-LAYER ASSESSMENT")
     print("=" * 68)
     print(f"  Records evaluated:  {n}")
     print(f"  Figures:            {len(metrics.get('figure_counts', {}))}")
@@ -416,27 +611,49 @@ def print_scorecard(result: Dict[str, Any], metrics: Dict[str, Any], warnings: L
         if len(warnings) > 5:
             print(f"    ... and {len(warnings) - 5} more")
 
+    # Layer verdicts summary
+    layers = result.get("layers", [])
+    if layers:
+        print()
+        for layer in layers:
+            v = layer["verdict"]
+            sym = "+" if v == "PASS" else "X"
+            print(f"  [{sym}] {layer['name']:<24} {v}  ({layer['passed']} passed, {layer['failed']} failed)")
+
     print("-" * 68)
 
-    for c in result["checks"]:
-        status = "PASS" if c["passed"] else "FAIL"
-        symbol = " + " if c["passed"] else " X "
-        op_str = c["op"]
-        val_str = str(c["value"])
-        thr_str = str(c["threshold"])
-        print(f"  {symbol} {c['metric']:<22}  {val_str:>8}  {op_str:>2} {thr_str:>6}  [{status}]")
-        if c["detail"]:
-            print(f"       {c['detail']}")
+    # Group checks by layer
+    layer_names = [l["name"] for l in layers] if layers else [""]
+    check_idx = 0
+    for layer in layers:
+        layer_check_count = layer["passed"] + layer["failed"]
+        if layer_check_count == 0:
+            continue
+        print(f"\n  --- {layer['name']} ---")
+        layer_checks = result["checks"][check_idx:check_idx + layer_check_count]
+        check_idx += layer_check_count
+        for c in layer_checks:
+            status = "PASS" if c["passed"] else "FAIL"
+            symbol = " + " if c["passed"] else " X "
+            op_str = c["op"]
+            val_str = str(c["value"])
+            thr_str = str(c["threshold"])
+            print(f"  {symbol} {c['metric']:<24}  {val_str:>8}  {op_str:>2} {thr_str:>6}  [{status}]")
+            if c["detail"]:
+                print(f"       {c['detail']}")
 
+    print()
     print("-" * 68)
 
     grade = result["grade"]
     if grade == "CERTIFIED":
-        print(f"  GRADE: CERTIFIED  ({result['passed']}/{result['total_checks']} checks passed)")
+        print(f"  GRADE: CERTIFIED  ({result['passed']}/{result['total_checks']} checks passed across 3 layers)")
         print(f"  This dataset meets quality standards for export and publication.")
     else:
         print(f"  GRADE: FAILED  ({result['passed']}/{result['total_checks']} passed, {result['failed']} failed)")
-        print(f"  This dataset does not meet quality standards. See failed checks above.")
+        failed_layers = [l["name"] for l in layers if l["verdict"] == "FAIL"]
+        if failed_layers:
+            print(f"  Failed layers: {', '.join(failed_layers)}")
 
     print("=" * 68)
 
@@ -502,7 +719,7 @@ def main():
         sys.exit(2)
 
     metrics = _compute_metrics(records)
-    result = grade_dataset(metrics, thresholds=custom_thresholds)
+    result = grade_dataset(metrics, thresholds=custom_thresholds, records=records)
 
     if args.json:
         output = {**result, "metrics": metrics, "warnings": warnings}
