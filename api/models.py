@@ -116,3 +116,93 @@ class ExportResponse(BaseModel):
     output_dir:      Optional[str]
     files_written:   List[str]
     error:           Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Verum — scoring and certification
+# ---------------------------------------------------------------------------
+
+class VerumValueInfo(BaseModel):
+    value_name:  str
+    description: str
+
+
+class VerumValuesResponse(BaseModel):
+    values: List[VerumValueInfo]
+    total:  int
+
+
+class VerumSignal(BaseModel):
+    value_name:               str
+    resistance:               float
+    label:                    str
+    label_reason:             str
+    confidence:               float
+    detection_method:         str   = "keyword"
+    disambiguation_confidence: float = 1.0
+    text_excerpt:             str   = ""
+
+
+class VerumScoreRequest(BaseModel):
+    text:         str   = Field(..., description="Text to score (max 50K chars).")
+    doc_type:     str   = Field("unknown", description="Document type.")
+    significance: float = Field(0.90, ge=0.0, le=1.0)
+    p1_threshold: float = Field(0.55, ge=0.0, le=1.0)
+    p0_threshold: float = Field(0.35, ge=0.0, le=1.0)
+
+
+class VerumScoreResponse(BaseModel):
+    verum_score:     float
+    resistance:      float
+    p1_count:        int
+    p0_count:        int
+    apy_count:       int
+    ambiguous_count: int
+    total_signals:   int
+    signals:         List[VerumSignal]
+
+
+class VerumCertifyRequest(BaseModel):
+    entity_name:  str          = Field(..., description="Entity being certified.")
+    samples:      List[str]    = Field(..., description="5-100 text samples. Certification demands substantial evidence.", min_length=5, max_length=100)
+    doc_type:     str          = Field("unknown")
+    significance: float        = Field(0.90, ge=0.0, le=1.0)
+    p1_threshold: float        = Field(0.55, ge=0.0, le=1.0)
+    p0_threshold: float        = Field(0.35, ge=0.0, le=1.0)
+    min_score:    float        = Field(0.60, ge=0.0, le=1.0)
+    min_values:   int          = Field(3, ge=1)
+
+
+class VerumValueScore(BaseModel):
+    p1_count:       int
+    avg_resistance: float
+
+
+class VerumCertifyResponse(BaseModel):
+    certificate_id:   str
+    entity_name:      str
+    certified:        bool
+    verum_score:      float
+    sample_count:     int
+    values_certified: List[str]
+    value_scores:     dict
+    issued_at:        float
+    doc_type:         str
+    p1_threshold:     float
+    p0_threshold:     float
+    min_score:        float
+    min_values:       int
+    signature:        str
+
+
+class VerumCertificateSummary(BaseModel):
+    certificate_id: str
+    entity_name:    str
+    certified:      bool
+    verum_score:    float
+    issued_at:      float
+
+
+class VerumCertificatesResponse(BaseModel):
+    certificates: List[VerumCertificateSummary]
+    total:        int

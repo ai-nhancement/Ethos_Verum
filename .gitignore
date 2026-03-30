@@ -17,6 +17,7 @@ env/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/users.json
 
 # Output — generated, reproducible from data
 output/
