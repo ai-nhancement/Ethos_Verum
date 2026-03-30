@@ -8,15 +8,16 @@ Reads a finished export (JSONL files) and produces a pass/fail grade with
 specific, reproducible metrics. No human judgment. The numbers decide.
 
 Metrics:
-  1. Value Coverage      — distinct values with signals (>= 5 to pass)
-  2. Label Balance       — no single label > 80% of total
-  3. Signal Density      — % of records with confidence >= 0.65 (>= 50% to pass)
-  4. Avg Confidence      — mean classification confidence (>= 0.65 to pass)
-  5. Resistance Spread   — std dev of resistance scores (>= 0.10 to pass)
-  6. Source Diversity     — distinct document types (>= 2 to pass)
-  7. Disambiguation Rate — % of signals with disambiguation_confidence >= 0.8 (>= 85%)
-  8. Consistency Floor   — min observation_consistency across records (>= 0.25)
-  9. Reproducibility     — deterministic check: hash of sorted records is stable
+   1. Record Count        — minimum records to qualify as a dataset (>= 20)
+   2. Value Coverage      — distinct values with signals (>= 5 to pass)
+   3. Label Distribution  — at least 2 labels present, none > 80%, P1 and P0 both present
+   4. Avg Confidence      — mean classification confidence (>= 0.65 to pass)
+   5. Resistance Spread   — std dev of resistance scores (>= 0.10 to pass)
+   6. Source Diversity     — distinct non-"unknown" document types (>= 2 to pass)
+   7. Disambiguation Rate — % of signals with disambiguation_confidence >= 0.8 (>= 85%)
+   8. Consistency Floor   — 5th percentile of observation_consistency (>= 0.25)
+   9. Text Quality        — % of records with text_excerpt >= 30 chars (>= 90%)
+  10. Per-Figure Minimum  — every figure has >= 5 records
 
 Usage:
   python -m cli.dataset_quality --input output/ric/
@@ -36,11 +37,10 @@ import hashlib
 import json
 import logging
 import math
-import os
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 _log = logging.getLogger(__name__)
 
@@ -48,26 +48,50 @@ _log = logging.getLogger(__name__)
 # Thresholds — deterministic, no human judgment
 # ---------------------------------------------------------------------------
 
-THRESHOLDS = {
+DEFAULT_THRESHOLDS = {
+    "min_records":              20,     # minimum records to be a dataset
     "value_coverage_min":       5,      # distinct values with signals
-    "label_balance_max_pct":    0.80,   # no single label > 80%
-    "signal_density_min":       0.50,   # % records with confidence >= 0.65
+    "label_max_pct":            0.80,   # no single label > 80%
+    "label_min_distinct":       2,      # at least 2 distinct labels with count >= 2
+    "require_p1_and_p0":        True,   # both P1 and P0 must be present
     "avg_confidence_min":       0.65,   # mean confidence
     "resistance_spread_min":    0.10,   # std dev of resistance
-    "source_diversity_min":     2,      # distinct doc types
+    "source_diversity_min":     2,      # distinct non-"unknown" doc types
     "disambiguation_rate_min":  0.85,   # % with disambig >= 0.8
-    "consistency_floor_min":    0.25,   # min observation_consistency
+    "consistency_pct5_min":     0.25,   # 5th percentile of observation_consistency
+    "text_quality_min_chars":   30,     # minimum chars for a text_excerpt to count
+    "text_quality_rate_min":    0.90,   # % of records meeting text_quality_min_chars
+    "per_figure_min_records":   5,      # every figure must have at least this many
 }
+
+
+# ---------------------------------------------------------------------------
+# Safe numeric conversion
+# ---------------------------------------------------------------------------
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Convert to float without raising. Returns default on any failure."""
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
 # Load records
 # ---------------------------------------------------------------------------
 
-def _load_records(input_path: str) -> List[Dict[str, Any]]:
-    """Load records from a JSONL file or all JSONL files in a directory."""
+def _load_records(input_path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Load records from a JSONL file or all JSONL files in a directory.
+    Returns (records, warnings) where warnings lists any issues encountered.
+    """
     path = Path(input_path)
-    records = []
+    records: List[Dict[str, Any]] = []
+    warnings: List[str] = []
 
     if path.is_file() and path.suffix == ".jsonl":
         files = [path]
@@ -76,27 +100,59 @@ def _load_records(input_path: str) -> List[Dict[str, Any]]:
         if not files:
             files = sorted(path.glob("*.jsonl"))
     else:
-        return []
+        return [], [f"Path does not exist or is not a file/directory: {input_path}"]
 
-    seen_ids = set()
+    seen_ids: set = set()
     for f in files:
         try:
-            for line in f.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                rec = json.loads(line)
-                # Deduplicate across files (positive/negative may overlap with per-figure)
-                rec_id = rec.get("id") or rec.get("source_obs_id", "")
-                if rec_id and rec_id in seen_ids:
-                    continue
-                if rec_id:
-                    seen_ids.add(rec_id)
-                records.append(rec)
+            lines = f.read_text(encoding="utf-8").splitlines()
         except Exception as e:
-            _log.warning("Could not read %s: %s", f, e)
+            warnings.append(f"Could not read {f.name}: {e}")
+            continue
 
-    return records
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as e:
+                warnings.append(f"{f.name}:{line_num}: malformed JSON: {e}")
+                continue
+
+            # Deduplicate across files
+            rec_id = rec.get("id") or rec.get("source_obs_id") or ""
+            if rec_id:
+                if rec_id in seen_ids:
+                    continue
+                seen_ids.add(rec_id)
+
+            records.append(rec)
+
+    return records, warnings
+
+
+# Need this for the type hint above — placed after use to avoid forward ref issues
+from typing import Tuple  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# Percentile helper
+# ---------------------------------------------------------------------------
+
+def _percentile(values: List[float], pct: float) -> float:
+    """Return the pct-th percentile (0-100) of a sorted list. Linear interpolation."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    n = len(s)
+    if n == 1:
+        return s[0]
+    k = (pct / 100.0) * (n - 1)
+    lo = int(k)
+    hi = min(lo + 1, n - 1)
+    frac = k - lo
+    return s[lo] + frac * (s[hi] - s[lo])
 
 
 # ---------------------------------------------------------------------------
@@ -110,52 +166,72 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {"error": "No records to evaluate", "record_count": 0}
 
     # ── Value Coverage ──
-    values_seen = set(r.get("value_name", "") for r in records)
-    values_seen.discard("")
+    values_seen = set()
+    for r in records:
+        vn = r.get("value_name", "")
+        if vn:
+            values_seen.add(vn)
     value_coverage = len(values_seen)
 
-    # ── Label Balance ──
+    # ── Label Distribution ──
     label_counts: Dict[str, int] = defaultdict(int)
     for r in records:
         label_counts[r.get("label", "UNKNOWN")] += 1
-    max_label_pct = max(label_counts.values()) / n if n > 0 else 1.0
+    max_label_pct = max(label_counts.values()) / n
     max_label_name = max(label_counts, key=label_counts.get)
-
-    # ── Signal Density (% with confidence >= 0.65) ──
-    high_conf_count = sum(1 for r in records if float(r.get("confidence", 0)) >= 0.65)
-    signal_density = high_conf_count / n
+    distinct_labels_with_mass = sum(1 for c in label_counts.values() if c >= 2)
+    has_p1 = label_counts.get("P1", 0) > 0
+    has_p0 = label_counts.get("P0", 0) > 0
 
     # ── Average Confidence ──
-    confidences = [float(r.get("confidence", 0)) for r in records]
+    confidences = [_safe_float(r.get("confidence"), 0.0) for r in records]
     avg_confidence = sum(confidences) / n
 
     # ── Resistance Spread ──
-    resistances = [float(r.get("resistance", 0)) for r in records]
+    resistances = [_safe_float(r.get("resistance"), 0.0) for r in records]
     mean_resistance = sum(resistances) / n
     variance = sum((x - mean_resistance) ** 2 for x in resistances) / n
     resistance_spread = math.sqrt(variance)
 
-    # ── Source Diversity ──
-    doc_types = set(r.get("document_type", "unknown") for r in records)
-    doc_types.discard("")
-    source_diversity = len(doc_types)
+    # ── Source Diversity (exclude "unknown") ──
+    doc_types_all = set()
+    doc_types_real = set()
+    for r in records:
+        dt = r.get("document_type", "unknown")
+        if dt:
+            doc_types_all.add(dt)
+            if dt.lower() != "unknown":
+                doc_types_real.add(dt)
+    source_diversity = len(doc_types_real)
 
     # ── Disambiguation Rate ──
-    disambig_scores = [float(r.get("disambiguation_confidence", 1.0)) for r in records]
+    disambig_scores = [_safe_float(r.get("disambiguation_confidence"), 1.0) for r in records]
     disambig_high = sum(1 for d in disambig_scores if d >= 0.8)
     disambiguation_rate = disambig_high / n
 
-    # ── Consistency Floor ──
-    consistencies = [float(r.get("observation_consistency", 0.5)) for r in records]
-    consistency_floor = min(consistencies) if consistencies else 0.0
+    # ── Consistency Floor (5th percentile, not min) ──
+    consistencies = [_safe_float(r.get("observation_consistency"), 0.5) for r in records]
+    consistency_pct5 = _percentile(consistencies, 5)
+
+    # ── Text Quality ──
+    text_lengths = [len(r.get("text_excerpt", "")) for r in records]
+    text_ok_count = sum(1 for tl in text_lengths if tl >= 30)
+    text_quality_rate = text_ok_count / n
+
+    # ── Per-Figure Record Counts ──
+    figure_counts: Dict[str, int] = defaultdict(int)
+    for r in records:
+        figure_counts[r.get("figure", "unknown")] += 1
+    min_figure_records = min(figure_counts.values()) if figure_counts else 0
+    weakest_figure = min(figure_counts, key=figure_counts.get) if figure_counts else "N/A"
 
     # ── Reproducibility Hash ──
-    # Sort by deterministic key, hash the content
+    # Sort by deterministic key, hash with rounded floats for stability
     sorted_records = sorted(records, key=lambda r: (
         r.get("figure", ""),
         r.get("value_name", ""),
         r.get("text_excerpt", "")[:80],
-        r.get("ts", 0),
+        _safe_float(r.get("ts"), 0),
     ))
     content_for_hash = json.dumps(
         [
@@ -164,8 +240,8 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "value_name": r.get("value_name", ""),
                 "text_excerpt": r.get("text_excerpt", "")[:80],
                 "label": r.get("label", ""),
-                "resistance": r.get("resistance", 0),
-                "confidence": r.get("confidence", 0),
+                "resistance": round(_safe_float(r.get("resistance")), 4),
+                "confidence": round(_safe_float(r.get("confidence")), 2),
             }
             for r in sorted_records
         ],
@@ -189,23 +265,30 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         by_value[vn]["_total"] += 1
 
     return {
-        "record_count":         n,
-        "value_coverage":       value_coverage,
-        "values_detected":      sorted(values_seen),
-        "label_counts":         dict(label_counts),
-        "max_label_pct":        round(max_label_pct, 4),
-        "max_label_name":       max_label_name,
-        "signal_density":       round(signal_density, 4),
-        "avg_confidence":       round(avg_confidence, 4),
-        "resistance_mean":      round(mean_resistance, 4),
-        "resistance_spread":    round(resistance_spread, 4),
-        "source_diversity":     source_diversity,
-        "doc_types":            sorted(doc_types),
-        "disambiguation_rate":  round(disambiguation_rate, 4),
-        "consistency_floor":    round(consistency_floor, 4),
-        "reproducibility_hash": reproducibility_hash,
-        "by_figure":            {k: dict(v) for k, v in sorted(by_figure.items())},
-        "by_value":             {k: dict(v) for k, v in sorted(by_value.items())},
+        "record_count":             n,
+        "value_coverage":           value_coverage,
+        "values_detected":          sorted(values_seen),
+        "label_counts":             dict(label_counts),
+        "max_label_pct":            round(max_label_pct, 4),
+        "max_label_name":           max_label_name,
+        "distinct_labels_with_mass": distinct_labels_with_mass,
+        "has_p1":                   has_p1,
+        "has_p0":                   has_p0,
+        "avg_confidence":           round(avg_confidence, 4),
+        "resistance_mean":          round(mean_resistance, 4),
+        "resistance_spread":        round(resistance_spread, 4),
+        "source_diversity":         source_diversity,
+        "doc_types":                sorted(doc_types_all),
+        "doc_types_real":           sorted(doc_types_real),
+        "disambiguation_rate":      round(disambiguation_rate, 4),
+        "consistency_pct5":         round(consistency_pct5, 4),
+        "text_quality_rate":        round(text_quality_rate, 4),
+        "min_figure_records":       min_figure_records,
+        "weakest_figure":           weakest_figure,
+        "figure_counts":            dict(figure_counts),
+        "reproducibility_hash":     reproducibility_hash,
+        "by_figure":                {k: dict(v) for k, v in sorted(by_figure.items())},
+        "by_value":                 {k: dict(v) for k, v in sorted(by_value.items())},
     }
 
 
@@ -213,21 +296,28 @@ def _compute_metrics(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 # Grade
 # ---------------------------------------------------------------------------
 
-def grade_dataset(metrics: Dict[str, Any]) -> Dict[str, Any]:
+def grade_dataset(
+    metrics: Dict[str, Any],
+    thresholds: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """
     Apply thresholds to metrics and return a pass/fail verdict for each.
     Returns {checks: [...], passed: int, failed: int, grade: "CERTIFIED"|"FAILED"}.
+    Uses DEFAULT_THRESHOLDS unless overridden.
     """
     if "error" in metrics:
         return {"grade": "ERROR", "reason": metrics["error"], "checks": [], "passed": 0, "failed": 1}
 
-    checks = []
+    T = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+    checks: List[Dict[str, Any]] = []
 
     def check(name: str, value, threshold, op: str = ">=", detail: str = ""):
         if op == ">=":
             passed = value >= threshold
         elif op == "<=":
             passed = value <= threshold
+        elif op == "==":
+            passed = value == threshold
         else:
             passed = False
         checks.append({
@@ -239,31 +329,54 @@ def grade_dataset(metrics: Dict[str, Any]) -> Dict[str, Any]:
             "detail": detail,
         })
 
-    T = THRESHOLDS
+    # 1. Record Count
+    check("Record Count", metrics["record_count"], T["min_records"],
+          detail=f"{metrics['record_count']} records in dataset")
 
+    # 2. Value Coverage
     check("Value Coverage", metrics["value_coverage"], T["value_coverage_min"],
-          detail=f"{metrics['value_coverage']} of 15 values detected: {', '.join(metrics['values_detected'][:8])}{'...' if len(metrics['values_detected']) > 8 else ''}")
+          detail=f"{metrics['value_coverage']} of 15 values detected: "
+                 f"{', '.join(metrics['values_detected'][:8])}"
+                 f"{'...' if len(metrics['values_detected']) > 8 else ''}")
 
-    check("Label Balance", metrics["max_label_pct"], T["label_balance_max_pct"], op="<=",
+    # 3. Label Distribution (two sub-checks)
+    check("Label Balance", metrics["max_label_pct"], T["label_max_pct"], op="<=",
           detail=f"Dominant label: {metrics['max_label_name']} at {metrics['max_label_pct']*100:.1f}%")
 
-    check("Signal Density", metrics["signal_density"], T["signal_density_min"],
-          detail=f"{metrics['signal_density']*100:.1f}% of records have confidence >= 0.65")
+    both_present = metrics["has_p1"] and metrics["has_p0"]
+    check("P1+P0 Present", both_present, True, op="==",
+          detail=f"P1: {metrics['label_counts'].get('P1', 0)}, "
+                 f"P0: {metrics['label_counts'].get('P0', 0)} — "
+                 f"{'both present' if both_present else 'MISSING ' + ('P0' if metrics['has_p1'] else 'P1') + ' signals'}")
 
+    # 4. Avg Confidence
     check("Avg Confidence", metrics["avg_confidence"], T["avg_confidence_min"],
           detail=f"Mean classification confidence: {metrics['avg_confidence']:.4f}")
 
+    # 5. Resistance Spread
     check("Resistance Spread", metrics["resistance_spread"], T["resistance_spread_min"],
           detail=f"Std dev: {metrics['resistance_spread']:.4f}, mean: {metrics['resistance_mean']:.4f}")
 
+    # 6. Source Diversity (excluding "unknown")
     check("Source Diversity", metrics["source_diversity"], T["source_diversity_min"],
-          detail=f"Document types: {', '.join(metrics['doc_types'])}")
+          detail=f"Real document types: {', '.join(metrics['doc_types_real']) or 'none'}"
+                 f"{' (unknown excluded)' if 'unknown' in metrics['doc_types'] else ''}")
 
+    # 7. Disambiguation Rate
     check("Disambiguation Rate", metrics["disambiguation_rate"], T["disambiguation_rate_min"],
           detail=f"{metrics['disambiguation_rate']*100:.1f}% of signals have disambiguation >= 0.8")
 
-    check("Consistency Floor", metrics["consistency_floor"], T["consistency_floor_min"],
-          detail=f"Minimum observation consistency: {metrics['consistency_floor']:.4f}")
+    # 8. Consistency Floor (5th percentile)
+    check("Consistency Floor", metrics["consistency_pct5"], T["consistency_pct5_min"],
+          detail=f"5th percentile of observation_consistency: {metrics['consistency_pct5']:.4f}")
+
+    # 9. Text Quality
+    check("Text Quality", metrics["text_quality_rate"], T["text_quality_rate_min"],
+          detail=f"{metrics['text_quality_rate']*100:.1f}% of records have text_excerpt >= {T['text_quality_min_chars']} chars")
+
+    # 10. Per-Figure Minimum
+    check("Per-Figure Minimum", metrics["min_figure_records"], T["per_figure_min_records"],
+          detail=f"Weakest figure: {metrics['weakest_figure']} with {metrics['min_figure_records']} records")
 
     passed = sum(1 for c in checks if c["passed"])
     failed = sum(1 for c in checks if not c["passed"])
@@ -284,27 +397,38 @@ def grade_dataset(metrics: Dict[str, Any]) -> Dict[str, Any]:
 # Display
 # ---------------------------------------------------------------------------
 
-def print_scorecard(result: Dict[str, Any], metrics: Dict[str, Any]) -> None:
+def print_scorecard(result: Dict[str, Any], metrics: Dict[str, Any], warnings: List[str] | None = None) -> None:
     """Print a human-readable quality scorecard."""
     n = result.get("record_count", 0)
 
     print()
-    print("=" * 64)
+    print("=" * 68)
     print("  DATASET QUALITY SCORECARD")
-    print("=" * 64)
+    print("=" * 68)
     print(f"  Records evaluated:  {n}")
+    print(f"  Figures:            {len(metrics.get('figure_counts', {}))}")
     print(f"  Reproducibility:    {result.get('reproducibility_hash', 'N/A')}")
-    print("-" * 64)
+
+    if warnings:
+        print(f"  Warnings:           {len(warnings)}")
+        for w in warnings[:5]:
+            print(f"    ! {w}")
+        if len(warnings) > 5:
+            print(f"    ... and {len(warnings) - 5} more")
+
+    print("-" * 68)
 
     for c in result["checks"]:
         status = "PASS" if c["passed"] else "FAIL"
         symbol = " + " if c["passed"] else " X "
-        op_str = ">=" if c["op"] == ">=" else "<="
-        print(f"  {symbol} {c['metric']:<22}  {str(c['value']):>8}  {op_str} {str(c['threshold']):>6}  [{status}]")
+        op_str = c["op"]
+        val_str = str(c["value"])
+        thr_str = str(c["threshold"])
+        print(f"  {symbol} {c['metric']:<22}  {val_str:>8}  {op_str:>2} {thr_str:>6}  [{status}]")
         if c["detail"]:
             print(f"       {c['detail']}")
 
-    print("-" * 64)
+    print("-" * 68)
 
     grade = result["grade"]
     if grade == "CERTIFIED":
@@ -314,7 +438,7 @@ def print_scorecard(result: Dict[str, Any], metrics: Dict[str, Any]) -> None:
         print(f"  GRADE: FAILED  ({result['passed']}/{result['total_checks']} passed, {result['failed']} failed)")
         print(f"  This dataset does not meet quality standards. See failed checks above.")
 
-    print("=" * 64)
+    print("=" * 68)
 
     # Per-figure summary
     if "by_figure" in metrics and metrics["by_figure"]:
@@ -356,31 +480,35 @@ def main():
     )
     args = parser.parse_args()
 
-    # Custom thresholds
+    # Custom thresholds (never mutates the global default)
+    custom_thresholds = None
     if args.thresholds:
         try:
-            custom = json.loads(Path(args.thresholds).read_text())
-            THRESHOLDS.update(custom)
+            custom_thresholds = json.loads(Path(args.thresholds).read_text())
         except Exception as e:
             print(f"Error loading thresholds: {e}", file=sys.stderr)
             sys.exit(2)
 
-    records = _load_records(args.input)
+    records, warnings = _load_records(args.input)
     if not records:
         if args.json:
-            print(json.dumps({"grade": "ERROR", "reason": "No records found at " + args.input}))
+            print(json.dumps({"grade": "ERROR", "reason": "No records found at " + args.input,
+                              "warnings": warnings}))
         else:
-            print(f"\n  ERROR: No JSONL records found at {args.input}\n")
+            print(f"\n  ERROR: No JSONL records found at {args.input}")
+            for w in warnings:
+                print(f"    ! {w}")
+            print()
         sys.exit(2)
 
     metrics = _compute_metrics(records)
-    result = grade_dataset(metrics)
+    result = grade_dataset(metrics, thresholds=custom_thresholds)
 
     if args.json:
-        output = {**result, "metrics": metrics}
+        output = {**result, "metrics": metrics, "warnings": warnings}
         print(json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        print_scorecard(result, metrics)
+        print_scorecard(result, metrics, warnings)
 
     sys.exit(0 if result["grade"] == "CERTIFIED" else 1)
 
