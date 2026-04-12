@@ -868,6 +868,29 @@ def _run_extraction(session_id: str) -> int:
                     })
                     merged_values.add(vname)
 
+        # Standalone vice observations (lexicon vice signals not captured by any other layer)
+        # Added here — after all boost layers — so the panel can verify them.
+        # Only fire when no other layer already detected the value in this passage.
+        # polarity_hint=-1 bypasses detect_polarity() at recording time (same as phrase layer).
+        if cfg.lexicon_enabled and lex_signals:
+            _already_detected = {s["value_name"] for s in merged}
+            for _lv in lex_signals:
+                if _lv.get("lexicon_polarity") != "vice":
+                    continue
+                if _lv["value_name"] in _already_detected:
+                    continue
+                if _lv["disambiguation_confidence"] < cfg.lexicon_standalone_min_conf:
+                    continue
+                merged.append({
+                    "value_name":                _lv["value_name"],
+                    "text_excerpt":              _lv["text_excerpt"],
+                    "significance":              _lv["significance"],
+                    "disambiguation_confidence": _lv["disambiguation_confidence"],
+                    "source":                    _lv["source"],  # e.g. "lexicon_vice" or "lexicon+ms_vice"
+                    "polarity_hint":             -1,
+                })
+                _already_detected.add(_lv["value_name"])
+
         # Comprehension panel — three-model signal verification (optional)
         # Runs after all L1-L3c layers so the full merged signal list is available.
         # Fail-open: panel failures leave merged unchanged.

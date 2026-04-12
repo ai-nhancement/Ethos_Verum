@@ -1,371 +1,382 @@
-# Ethos: A Resistance-Weighted Behavioral Corpus for Value-Aligned AI Training
+# Ethos: A Behavioral Dataset Compiler for Value-Aligned AI
 
-**[Author: John V. — AI-nhancement]**
+**[Author: John V. - AI-nhancement]**
+
+---
+
+## Ethos in 60 Seconds
+
+Ethos is a pipeline for extracting value-relevant training data from documented human behavior rather than from hypotheticals alone.
+
+It does four things:
+
+1. It reads historical material such as journals, letters, speeches, and documented actions.
+2. It extracts value signals such as courage, integrity, fairness, or failure of those values.
+3. It scores each signal by **resistance**: how costly it appears to have been to hold that value in context.
+4. It optionally sends the extracted signal through a **comprehension panel**: three independent models voting on whether the signal should be kept, relabeled, or discarded.
+
+The core idea is simple: a value stated in comfort is weak evidence. A value held under pressure is stronger evidence. A value abandoned under pressure may be especially informative negative evidence.
+
+Ethos is not presented here as a solved theory of morality or a finished alignment solution. It is a research direction and a reproducible pipeline for building behavior-grounded value data.
 
 ---
 
 ## Abstract
 
-The alignment of artificial intelligence systems with human values remains one of the central unsolved problems in AI safety research. Existing approaches draw on one of two sources: hypothetical moral scenarios designed by researchers, or human preference rankings collected at scale. Both inherit a fundamental limitation — they capture declared values, not demonstrated ones. We introduce **Ethos**, a behavioral extraction pipeline that derives value signal from documented historical behavior: journals, letters, speeches, and recorded actions of historical figures across the full human spectrum, from the canonically virtuous to the historically destructive. Ethos introduces four novel contributions: (1) a **resistance score** that quantifies the cost of holding a demonstrated value in context — a signal absent from all existing value alignment datasets; (2) a **document authenticity weighting** scheme that calibrates evidence quality based on the performance pressure present at the time of writing; (3) a **two-axis value model** (resistance × polarity) that distinguishes demonstration strength from constructive/destructive direction; and (4) a **comprehension panel** — three-model majority-vote post-extraction verification that independently confirms or discards each extracted signal. The pipeline produces labeled training data in three classes: P1 (value held under meaningful resistance), P0 (value failed or corrupted), and APY (Answer-Pressure Yield — value abandoned under identified external pressure). We argue that the most important signal in a value-alignment corpus lies not at the poles — celebrated saints or documented villains — but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moments of both extraordinary integrity and ordinary failure reside. A full-pipeline extraction on a 12-passage Gandhi sample produced 46 observations across 12 values; 38/46 (83%) were panel-verified, and false-positive P0 signals were reduced by 64%. Cross-figure convergence testing across Gandhi, Lincoln, and Marcus Aurelius confirmed 5 values present in all three figures across radically different historical contexts and centuries. Ethos is the first pipeline designed to extract behavioral value evidence at scale from the historical record, to score it for the cost of demonstration, and to verify each signal through independent multi-model consensus.
+The alignment of artificial intelligence systems with human values remains one of the central unsolved problems in AI safety. Most existing alignment data is built from hypothetical scenarios or human preference rankings over model outputs. These approaches capture what people say is right, but only partially capture what people do when values are tested under real conditions.
+
+We present Ethos, a behavioral extraction pipeline that builds value-relevant training data from documented human behavior: journals, letters, speeches, and recorded actions across the human spectrum. Ethos is based on a simple premise: values in comfort are weak evidence. Values under pressure are stronger. Values that fail under pressure may be the most informative of all.
+
+The system introduces four linked ideas: a resistance score that operationalizes the cost of maintaining a value in context; document authenticity weighting that distinguishes private writing from public performance; a two-axis model separating value strength from value direction; and an optional comprehension panel, where three independent models vote on whether extracted signals should be retained, relabeled, or discarded.
+
+Ethos produces three principal label classes: P1 (value held), P0 (value failed), and APY (Answer-Pressure Yield, where a value is abandoned under identifiable pressure). Rather than focusing only on idealized exemplars or obvious failures, Ethos targets the middle range of human behavior - where commitment, compromise, failure, and revision coexist under real stakes.
+
+We present Ethos as a behavioral dataset compiler for AI alignment: a method for constructing training and evaluation data grounded in observed human conduct rather than hypothetical judgment.
 
 ---
 
 ## 1. Introduction
 
-When we ask whether an AI system is "aligned with human values," we are implicitly assuming we know what human values look like in practice. The evidence suggests we are less certain than we believe.
+Most alignment datasets answer some version of this question:
 
-Most datasets used to train value-aligned models fall into one of two categories. The first category consists of **hypothetical moral scenarios**: carefully constructed vignettes asking annotators to judge the morality of an action, assign blame, or rank outcomes (Hendrycks et al., 2021). These datasets are rigorous by design, but they measure declared moral preference — what annotators believe they would do, or what they believe is right, in a situation they have never faced. Decades of social psychology research documents the gap between moral intention and moral behavior under pressure (Milgram, 1963; Haidt, 2001). A dataset of intentions is not a dataset of behavior.
+*What do people say is right?*
 
-The second category consists of **human preference rankings**: pairs of model outputs labeled by annotators as better or worse along axes like helpfulness and harmlessness (Ouyang et al., 2022). These datasets are large-scale and have produced demonstrably improved models. But preference rankings are scalar and momentary. They capture which of two outputs an annotator preferred at one point in time — not the underlying value that drove the preference, and certainly not whether that preference would hold under adversarial pressure, personal cost, or sustained challenge.
+That question matters. But it is not sufficient.
 
-The result is that current value-alignment training data, whatever its scale and quality, addresses the question: *what do people say is right?* The question it does not address — the harder and more important question — is: *what do people actually do when holding a value costs them something?*
+A second question is at least as important - and far less studied:
 
-This paper introduces **Ethos**, a pipeline designed to address the second question.
+*What do people actually do when holding a value costs them something?*
 
-Ethos extracts value signal from historical text — the documented words and actions of real people in real situations with real stakes. It scores each observation on how much it cost to hold that value: the **resistance score**. It calibrates the authenticity of evidence based on the performance conditions under which it was produced: the **document type** signal. And it classifies extracted observations into three labels — P1 (held), P0 (failed), APY (yielded under pressure) — that together capture the full dynamic of values under pressure, not just their presence.
+There is a gap between stated values and demonstrated behavior. People endorse principles in comfort that they do not always maintain under pressure. Social psychology has documented this gap for decades. Yet most alignment data remains closer to stated judgment than to lived behavior.
 
-Two research gaps motivate this work. First, no existing NLP dataset extracts human values from historical text. The historical record contains thousands of documented instances of humans demonstrating, failing, and struggling with specific values under conditions ranging from mortal threat to political coercion to intimate betrayal — and none of this behavioral evidence is currently represented in alignment training data. Second, no existing alignment dataset quantifies **resistance**: the cost of holding a value. Resistance is arguably the most important signal in value data, because a value that costs nothing to hold is weak signal — it may be preference, habit, or social performance rather than genuine commitment.
+A person may endorse honesty in principle, but choose differently when honesty risks prison, reputation, or power.
 
-Our contributions are:
+Ethos is an attempt to build data for that missing layer.
 
-1. A **behavioral extraction pipeline** (Ethos) that generates value signal from historical text using multi-layer deterministic extraction — keyword, lexicon, phrase, structural, semantic, and classifier layers — with no LLM required for base operation.
-2. A **resistance scoring framework** that estimates the cost of demonstrating a value in context, incorporating document authenticity, significance, and adversity language markers.
-3. A **three-class labeling scheme** (P1/P0/APY) that captures held values, failed values, and pressure-yield dynamics — the APY class being novel to this work.
-4. A **two-axis value model** (resistance × polarity) that distinguishes the strength of value demonstration from its constructive/destructive direction, enabling explicit representation of vice signals and P0 classification from lexical evidence.
-5. A **pronoun-aware phrase layer** (L1c) that disambiguates first-person agency from third-person description and passive framing, improving attribution accuracy without dependency on a full syntactic parser.
-6. An optional **comprehension panel** — three-model majority-vote verification (DigitalOcean Gradient API) — that fires post-extraction to filter false positives and upgrade signal polarity labels, reducing false-positive P0 signals by approximately 64% in pilot testing.
-7. An argument for the **spectrum principle**: that the most valuable training signal for value alignment lies not at the behavioral poles but in the complex middle ground where asymmetric value profiles, domain-specific courage, and documented moral failure coexist in the same person.
-8. Six **implemented quality extensions** beyond the base pipeline: cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, observation consistency scoring, source chain tracking, and corpus quality gating.
+Instead of starting with rules, hypothetical scenarios, or preference rankings, Ethos starts with documented history: diaries, private letters, public speeches, autobiographical records, and observed actions. It asks whether these materials can be transformed into a structured dataset of value-relevant behavior under real conditions.
 
----
+The core claim is simple:
 
-## 2. Background and Related Work
+*values under pressure are more informative than values in comfort.*
 
-### 2.1 Value Theory in Psychology
+If that claim holds, then current alignment methods may be missing a critical category of signal. Models trained primarily on preferences and rules may learn to reproduce acceptable outputs, but not necessarily to model what value maintenance looks like when incentives push in the opposite direction.
 
-Human value research has produced several taxonomies relevant to AI alignment work.
-
-**Schwartz's Theory of Basic Human Values** (Schwartz, 1992) proposes ten universal values organized around two bipolar dimensions: Openness to Change vs. Conservation, and Self-Enhancement vs. Self-Transcendence. The theory has been empirically validated across more than 80 countries. Crucially, Schwartz operationalizes values as motivational goals that serve as guiding principles — abstract ideals that express themselves in behavioral patterns over time, not momentary preferences.
-
-**Peterson and Seligman's Character Strengths and Virtues** (2004) taxonomizes 24 character strengths organized under six virtues: wisdom, courage, humanity, justice, temperance, and transcendence. Their framework is explicitly behavioral — strengths are defined as positive traits reflected in thoughts, feelings, and behaviors — and was designed to be cross-culturally and historically grounded.
-
-**Haidt's Moral Foundations Theory** (Haidt & Joseph, 2004; Haidt, 2012) proposes that human moral reasoning is organized around five to six innate foundations: Care/Harm, Fairness/Reciprocity, Loyalty/Betrayal, Authority/Subversion, Sanctity/Degradation, and Liberty/Oppression. This framework has been applied in NLP analysis of moral language, notably in the Moral Foundations Twitter Corpus (Hoover et al., 2020).
-
-These frameworks share a common assumption that Ethos inherits: values are observable in behavior, not only in self-report. Where they rely on survey instruments and annotated datasets, Ethos relies on the historical record — which offers something surveys cannot: behavioral evidence under conditions of genuine cost.
-
-### 2.2 Value Alignment Datasets
-
-**The ETHICS Dataset** (Hendrycks et al., 2021) spans five moral domains with approximately 130,000 examples asking models to predict human moral judgments on constructed scenarios. Its primary limitation for our purposes is that all examples are hypothetical: they capture moral cognition about imagined situations, not behavioral evidence from real ones.
-
-**InstructGPT and RLHF** (Ouyang et al., 2022) represent the dominant practical paradigm: collect human preference rankings on model outputs, train a reward model, optimize with reinforcement learning. This approach has produced measurably improved model behavior. Its limitations as a value-learning framework are structural: preferences are scalar and contextless — the annotator is not under pressure; preferences may reflect aesthetic or stylistic bias rather than value judgment; and the feedback loop is between model outputs and annotator preferences, not between model behavior and demonstrated human values.
-
-**Constitutional AI** (Bai et al., 2022) operationalizes values as explicit principles used for self-critique and revision during training. This approach is transparent and scalable, but values are pre-specified by researchers rather than derived from behavioral evidence. The question of whether specified principles correspond to values as actually demonstrated by humans in practice is separate from the question of whether models follow them.
-
-### 2.3 Historical Text and NLP
-
-The extraction of moral or value content from historical text is a relatively underexplored area of NLP. Studies have applied sentiment analysis and moral lexicons to literary corpora (Klinger et al., 2021), and moral language analysis has been applied to social media text (Hoover et al., 2020) and news corpora (Fulgoni et al., 2016). However, no published dataset is designed specifically to extract value demonstrations from historical figures' documented behavior and to score those demonstrations for resistance — the cost incurred in holding the demonstrated value.
-
-### 2.4 The Cost of Ethical Behavior
-
-The concept of "resistance" — the cost of holding a value — is under-theorized in the AI alignment literature. Kenton et al. (2021) discuss the "alignment tax" at the system level: the performance costs of constrained AI behavior. But at the dataset level, the question of what it cost a human actor to demonstrate a value has not been operationalized.
-
-This is a significant gap. A value held at zero cost is weak behavioral evidence — it may be habit, social expectation, or self-interest alignment rather than genuine commitment. The most informative examples of human values in the historical record are precisely those where holding the value came at real cost: reputational damage, physical danger, financial loss, political consequence. Milgram's (1963) obedience experiments demonstrated exactly this: absent cost, people comply with authority far more readily than they believe they would. The inverse — maintaining values when authority demands otherwise — is the rare and informative case.
-
-Ethos operationalizes this insight as the resistance score.
+Ethos is designed to explore whether a behavior-grounded dataset can help fill that gap.
 
 ---
 
-## 3. The Ethos Pipeline
+## 2. Why Ethos Matters
 
-### 3.1 Overview
+Ethos matters because it shifts the source material of alignment work.
 
-Ethos is a three-stage pipeline:
+Most current pipelines rely on one of three sources:
 
-1. **Ingestion:** A source text is segmented into sentence-bounded passages and stored with metadata (figure identity, document type, publication year, significance score).
-2. **Extraction:** Each passage is scanned against a 15-value vocabulary. Matching passages receive a resistance score. Observations are stored in an append-only ledger.
-3. **Export:** Observations are classified (P1/P0/APY) using resistance scores and text marker analysis. Training records are written as JSONL with full provenance metadata.
+1. Human judgments about hypothetical moral scenarios.
+2. Human preferences over model outputs.
+3. Researcher-authored constitutions or principles.
 
-The base pipeline is deterministic throughout. The keyword, lexicon, phrase, structural, semantic, and classifier layers produce identical output given identical input and thresholds. This is a design requirement: a training data generation tool must be reproducible and auditable.
+Those are all valuable. But they are still one step removed from lived behavior.
 
-An optional fourth stage — **verification** — may be applied after extraction: the comprehension panel queries three LLMs in parallel with binary questions (Q1: "does the figure hold this value?" / Q2: "does the figure violate this value?") and applies majority-vote verdicts (≥2/3 models agreeing) to filter, relabel, or split extracted signals. This stage is disabled by default; the pipeline operates fully without it. When enabled, verification introduces non-determinism bounded to the signal-filtering pass — the extraction outputs are preserved and only the final signal list is modified.
+Ethos asks a different question: what if alignment data were built from documented human conduct under real conditions?
 
-### 3.2 Segmentation
+That shift matters for three reasons.
 
-Source text is segmented into sentence-bounded passages of up to 450 characters. Passages shorter than 30 characters are discarded. The passage length constraint balances two requirements: long enough to capture context (a single sentence is insufficient for value signal detection), short enough that value signal remains attributable to a specific thought rather than averaged across a paragraph.
+### 2.1 It moves from declared values to demonstrated values
 
-### 3.3 The Value Vocabulary
+A person can say they value honesty, courage, or fairness. That tells us something. But it tells us less than seeing whether they maintained those values when it became costly.
 
-Ethos uses a keyword vocabulary of 15 named values, each with a set of keyword triggers matched case-insensitively:
+Ethos is built around that difference.
 
-| Value | Representative Keywords |
-|-------|------------------------|
-| integrity | honest, truth, genuine, transparent, won't lie |
-| courage | afraid, brave, risk, facing my fear, terrified |
-| compassion | care about, worry about, sad for, heart goes out |
-| commitment | promise, committed, dedicated, won't give up |
-| patience | patient, waiting, take time, eventually |
-| responsibility | my fault, responsible for, accountable, on me |
-| fairness | fair, equal, justice, unfair, not right |
-| gratitude | grateful, thankful, appreciate, means a lot |
-| curiosity | wondering, curious, fascinated, want to know |
-| resilience | keep going, bounce back, despite, won't quit |
-| love | love, care deeply, cherish, means the world |
-| growth | improve, learning, growing, working on myself |
-| independence | on my own, my choice, self-reliant |
-| loyalty | stand by, loyal, won't leave, through thick and thin |
-| humility | I was wrong, my mistake, I need to admit |
+### 2.2 It treats pressure as signal, not noise
 
-The vocabulary draws from Peterson and Seligman's Character Strengths taxonomy (2004) and Schwartz's universal values framework (1992), selecting values with clear keyword signatures in first-person and behavioral description text. At most one observation is recorded per value per passage. A passage may produce observations for multiple distinct values.
+Most datasets flatten away the very thing that may matter most: adversity, coercion, danger, temptation, self-interest, and fear. Ethos treats those as part of the evidence. The point is not simply whether a value appears. The point is whether it survives contact with resistance.
 
-### 3.4 Resistance Scoring
+### 2.3 It creates a path toward behavior-grounded alignment data
 
-The resistance score is the core novel contribution of Ethos. It estimates the cost of holding the demonstrated value in the specific passage context.
+If successful, Ethos would not just be another ethics dataset. It would be a way of compiling behavioral evidence for alignment work: training examples, red-team cases, and possibly evaluation sets built from real-world human value maintenance and value failure.
 
-```
-resistance = clip( base + sig_bonus + doc_type_bonus + text_bonus, 0.0, 1.0 )
+That is why the simplest shorthand for Ethos is:
 
-base           = 0.25
-sig_bonus      = min(significance × 0.40, 0.30)
-doc_type_bonus = f(document_type)   (Table 1)
-text_bonus     = 0.20               (if adversity markers detected)
-```
+**a behavioral dataset compiler for AI alignment**
 
-**Table 1. Document type bonuses**
-
-| Document Type | Bonus | Rationale |
-|---------------|-------|-----------|
-| action | +0.40 | Documented behavior — not words, deeds |
-| journal | +0.35 | Private writing — no audience, no performance pressure |
-| letter | +0.30 | Directed correspondence — lower performance pressure |
-| speech | +0.10 | Public address — highest performance pressure |
-| unknown | +0.20 | Default |
-
-The document type bonus encodes a principled intuition from performance theory: a private diary entry cannot be written for an audience that does not exist; its content reflects genuine inner state rather than social presentation. A public speech is partially or wholly constructed for effect. These differences in performance pressure correspond to differences in the authenticity of the value signal.
-
-The significance score (range 0.0–1.0, set at ingestion) represents the source authority assessment. A published, verified diary entry from a primary historical source receives 0.90; a dubious attribution might receive 0.50.
-
-The text bonus fires when adversity language markers are detected in the passage: *even though*, *despite*, *but I still*, *hard to*, *at a cost*, *risk losing*, and related phrases. Their presence increases the resistance score regardless of document type.
-
-Maximum achievable resistance: 1.0 (clipped from 0.25 + 0.30 + 0.40 + 0.20 = 1.15). Minimum: 0.25 (base only, speech type, no adversity markers, zero significance).
-
-### 3.5 The Value Registry
-
-For each figure, Ethos maintains a value registry: an aggregate profile across all ingested passages. The primary measure is **weight**:
-
-```
-weight = demonstrations × avg_significance × avg_resistance × consistency
-```
-
-Where consistency is `1 − (std_dev / mean)` of resistance scores, clamped to [0.0, 1.0]. Consistency rewards figures who demonstrate a value stably across diverse contexts rather than in a single high-stakes moment.
-
-Weight encodes: *how often* × *how much each instance mattered* × *how costly it was* × *how stable the pattern is*.
-
-### 3.6 Classification
-
-During export, each value observation is classified into one of four labels:
-
-**P1 — Value held under meaningful resistance.** High resistance score (≥ 0.55), hold markers (*despite*, *stood firm*, *refused to give*), or APY pressure context with no yield.
-
-**P0 — Value failed or corrupted.** Explicit failure markers (*gave in*, *yielded*, *I lied*, *I rationalized*), or low resistance score (< 0.35) with no hold markers.
-
-**APY — Answer-Pressure Yield.** The most informative negative class: external pressure explicitly present AND value failed. Pressure markers (*under pressure*, *when threatened*, *they demanded*, *forced to*) combined with failure markers. APY captures the moment of capitulation under identified coercion — structurally distinct from simple failure. This class is novel to this work.
-
-**AMBIGUOUS.** Insufficient signal to classify: middle resistance range (0.35–0.55) with no clear markers in either direction.
-
-Classification priority: APY context is checked first (most specific), then failure markers, then resistance thresholds.
-
-### 3.7 Phrase Layer and Polarity Scoring
-
-**Pronoun-aware phrase layer (L1c).** Keyword and lexicon layers detect value-relevant language but not agency — whether the figure is the grammatical agent of the demonstrated act. "He refused to compromise" and "I refused to compromise" carry different evidential weight. The phrase layer applies pronoun-aware subject/object resolution to distinguish first-person agency from third-person description and passive framing. The distinction is bypassed for `action`-type documents, where biographical third-person framing is valid evidence of the figure's own behavior.
-
-**Two-axis polarity layer.** The original one-axis resistance model could not represent value direction — a high-resistance observation might be constructive demonstration or destructive expression of the same value. The polarity layer assigns `value_polarity` (+1 constructive, −1 destructive, 0 unscored) and `polarity_confidence` (0.0–1.0) to each observation using three tiers: a per-value target lexicon, MFT vice/virtue signals from the lexicon layer, and an optional zero-shot pass. This enables explicit P0 labeling from lexical evidence — not only from explicit failure markers — and makes vice signals from the MFD2.0 lexicon first-class observations rather than discarded noise.
-
-### 3.8 Comprehension Panel
-
-After all deterministic extraction layers complete, an optional verification stage may be applied. The comprehension panel queries three independent language models in parallel via DigitalOcean's Gradient API. For each extracted signal, each model is asked two binary questions: Q1 — "Does this passage demonstrate that the figure holds this value?" and Q2 — "Does this passage demonstrate that the figure violates this value?"
-
-Four verdicts are possible from majority vote (≥2/3 models agreeing):
-- **P1** — Q1 positive majority → signal confirmed positive; `polarity_hint` set to +1
-- **P0** — Q2 positive majority → signal confirmed negative; `polarity_hint` set to −1
-- **tension** — both Q1 and Q2 positive majority → signal duplicated as both P1 and P0 observations
-- **discard** — neither positive majority → signal removed
-- **skip** — insufficient model responses (≥2 abstentions) → signal passed through unchanged
-
-The panel appends `+panel` to the `source` chain in `value_observations`, making panel-verified signals fully auditable. The panel is fail-open at every boundary: missing API key, import error, call timeout, and response parse failure all result in the original signal being returned unchanged.
-
-### 3.9 Extended Pipeline Features
-
-The following quality extensions are fully implemented in the current release:
-
-**Cross-Passage APY Detection.** In documented historical behavior, pressure and response rarely co-occur in a single passage — Lincoln documents political pressure in a journal entry; the corresponding reversal appears in a speech weeks later. A per-figure APY context window (configurable N passages or 72-hour time window) links pressure passages to subsequent failure passages, correctly labeling the latter APY rather than P0. The `pressure_source_id` field in exported records links each cross-passage APY back to its pressure origin. Deferred APY lag (seconds and passage count between pressure and failure) is exported as a separate behavioral signal.
-
-**Keyword Context Disambiguation.** Substring matching produces systematic false positives: "I was afraid of being late" fires on `courage`; "my patient recovered" fires on `patience`. A second-pass filter checks grammatical role (disqualifying non-virtue usages), first-person grounding (agent proximity within a token window), and action-evidence context (value-relevant action words surrounding the keyword). Each observation receives a `disambiguation_confidence` field (0.0–1.0); the export pipeline accepts a `--min-disambiguation` threshold.
-
-**Value Co-occurrence and Tension Modeling.** The pipeline computes a 105-pair co-occurrence matrix at export time. When two structurally-tensioned values (independence vs. loyalty, fairness vs. compassion, courage vs. patience) are co-detected and one is labeled P1 while the other contains failure markers, a value tension event is recorded. These events carry 1.5× training weight — the highest in the corpus — because they document not just that a value was held, but that holding it required sacrificing another valued outcome.
-
-**Observation Consistency Scoring.** The value registry includes a consistency score computed at every update:
-
-```
-consistency = 0.30 × min(1.0, n/10)             ← volume
-            + 0.30 × (1.0 − σ_r / 0.40)         ← resistance stability
-            + 0.25 × min(1.0, span_s/31536000)   ← temporal spread
-            + 0.15 × min(1.0, doc_types/3)        ← source diversity
-```
-
-This distinguishes a figure with 45 observations across 30 years of journals and speeches from one with 3 observations in a single address — a distinction invisible to the raw weight scalar.
+Given this shift in source material, the next question is how such behavior can be represented and measured.
 
 ---
 
-## 4. The Spectrum Principle
+## 3. Core Idea
 
-The most consequential design decision in Ethos is not technical — it is the decision about *which figures to ingest*.
+Ethos is built around three intuitions.
 
-### 4.1 The Problem With Poles
+### 3.1 Values are more informative when they cost something
 
-**Canonically virtuous figures** (Gandhi, Lincoln, Mandela) produce predominantly P1 observations at high resistance. These are valuable training examples. But a corpus built only from such figures has a structural bias: these figures are documented *because* they were virtuous. The historical record is already filtered toward the heroic, and the corpus inherits that filter. A model trained on this data learns to recognize virtue performance — the markers of recognized virtue in already-celebrated figures — not the underlying behavioral pattern that constitutes virtue in context.
+A value held at no cost may reflect habit, convenience, or social performance. A value held under threat, sacrifice, or sustained pressure is stronger evidence of commitment.
 
-**Historically negative figures** produce predominantly P0 and APY observations. But the most extreme negative figures present a similar problem in reverse: their failures are so total and so well-documented that a model trained on these examples learns to recognize obvious villainy, not moral drift. The moral failures that cause actual harm in AI systems are not the obvious cases — they are the subtle, incremental rationalizations, the small compromises that compound, the APY dynamics where values erode under sustained pressure.
+Ethos operationalizes that intuition through the **resistance score**.
 
-Both poles teach pattern matching on reputation, not judgment in context.
+### 3.2 Failure under pressure is not the same as failure in general
 
-### 4.2 The Middle Ground
+A person can fail a value casually, repeatedly, or under direct coercion. Those are not the same pattern. Ethos treats **Answer-Pressure Yield (APY)** as a distinct negative class: the value is present, pressure is present, and the person yields.
 
-The figures of greatest value to an alignment corpus are neither saints nor monsters. They are figures like JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — people of genuine historical consequence with documented asymmetric value profiles.
+That distinction matters because many real failures are not simple negations. They are erosions under stress.
 
-**Asymmetric profiles** are the norm, not the exception. MLK demonstrated extraordinary `courage` and `commitment` under life-threatening pressure in civil rights contexts. His personal life contains documented failures of `integrity` and `loyalty`. These are not contradictions to be explained away — they are the most realistic picture available of how values actually operate in a human being: domain-specific, context-sensitive, not uniformly distributed. That asymmetry is the data.
+### 3.3 The middle ground is where much of the signal lives
 
-**Value evolution over time** is only visible in the middle ground. Malcolm X's transformation — from the uncompromising separatism of his early activism to the universalism of his post-Mecca period — documents a human being revising deeply held values under accumulated evidence. That process of revision is arguably the most important behavioral signal for alignment: values can be learned, revised, and improved. A corpus that only includes figures with stable, unambiguous value profiles cannot represent this.
+The most useful historical figures for this kind of corpus may not be the clean exemplars or the obvious monsters. They may be the mixed cases: people with asymmetric profiles, domain-specific courage, public principle and private failure, or visible value revision over time.
 
-**APY dynamics** are richest in middle-ground figures. The moment of hesitation before a political compromise, the private letter acknowledging doubt before a public statement of certainty, the documented decision that traded a stated value for a practical gain — these patterns appear in abundance in complex figures and almost nowhere in pure exemplars of virtue or villainy.
-
-### 4.3 Implementation
-
-The spectrum principle is implemented architecturally through the **no-pre-labeling invariant**: no figure is labeled positive or negative at ingestion time. Classification emerges entirely from resistance scores and marker patterns in the source text. The pipeline processes Gandhi and Nixon identically. Their profiles emerge from the data, preventing researcher bias from contaminating the corpus at the source.
+Ethos calls this the **spectrum principle**.
 
 ---
 
-## 5. Preliminary Results
+## 4. How the Pipeline Works
 
-We report two sets of results. The first is a multi-figure pilot demonstrating cross-figure convergence. The second is a single-figure deep test of the full pipeline including the comprehension panel.
+At a high level, Ethos has four stages.
 
-### 5.1 Multi-Figure Pilot
+### 4.1 Ingestion
 
-Extraction across three historical figures — Gandhi (journal passages, 1927), Lincoln (letters, mixed period), and Marcus Aurelius (*Meditations*, ~180 AD) — validated the pipeline and demonstrated cross-figure value convergence.
+Source material is segmented into short, sentence-bounded passages and stored with metadata such as:
 
-**Pilot corpus summary:**
+- figure identity
+- document type
+- publication year
+- significance score
 
-| Figure | Document Type | Passages | Values Detected | Mean Resistance |
-|--------|--------------|----------|----------------|-----------------|
-| Gandhi | journal | ~14 | 15 | 0.89 |
-| Lincoln | letter | ~10 | 12 | 0.76 |
-| Marcus Aurelius | journal | ~13 | 11 | 0.82 |
+### 4.2 Extraction
 
-**Cross-figure value convergence:** Five values were detected in all three figures: `commitment`, `resilience`, `fairness`, `courage`, and `humility`. This convergence across radically different historical contexts, cultures, and centuries supports the claim that the 15-value vocabulary captures behavioral signals that are not period- or culture-specific.
+Each passage is scanned for value-relevant signal using multiple layers:
 
-### 5.2 Full-Pipeline Verification Test (Gandhi)
+- keyword matching
+- lexicon support
+- phrase and agency analysis
+- structural cues such as adversity and stakes
+- semantic similarity
+- independent classifier support
 
-A full-pipeline extraction — including all L1–L3c layers and the comprehension panel — was run on a 12-passage Gandhi sample covering the full behavioral spectrum: nonviolent resistance, imprisonment, South Africa racial hierarchy positions, brahmacharya experiments, Noakhali riots courage, and public self-criticism.
+The reason for multiple layers is straightforward: no single detector is reliable enough for this task on its own.
 
-**Results:**
-- **46 observations** extracted across **12 distinct values**
-- **38/46 (83%)** panel-verified — source chain includes `+panel`
-- **4 P0 signals** remaining after panel filtering (down from ~11 pre-panel, a 64% false-positive reduction)
-- Correctly identified P0 violations: South Africa racial hierarchy acceptance (fairness), brahmacharya experiments imposing personal austerities without full consent (integrity, responsibility)
-- Correctly confirmed P1 holds: nonviolent resistance to Rowlatt Act, Noakhali riot courage under daily death threats, fast unto death in Calcutta, public acknowledgment of personal failures
+### 4.3 Scoring
 
-**Sample source chains:** `keyword+semantic+zeroshot+panel`, `keyword+structural+panel`, `keyword+lexicon+mft+panel`
+Each extracted observation receives a **resistance score** based on:
 
-These results demonstrate that the multi-layer convergent architecture produces defensible signal classification: observations independently confirmed by multiple layers and verified by the panel are the strongest training examples in the corpus.
+- a base value
+- source significance
+- document type
+- adversity markers in the text
 
-**Panel performance note:** At base-tier DigitalOcean models (`openai-gpt-oss-120b`, `deepseek-r1-distill-llama-70b`, `openai-gpt-oss-20b`), verification ran at approximately 34 seconds per passage. Premium tier models (Claude Opus 4.6, GPT-5.4, O3) are expected to reduce both latency and false-negative rate.
+The score is not meant to be a final scientific measurement of moral cost. It is an explicit heuristic for ranking how strong the behavioral evidence appears to be.
 
-These results are preliminary. They are intended to demonstrate pipeline functionality and panel effectiveness rather than to validate the corpus as a training resource. Validation at scale — with broader figure coverage, independent annotation of sample observations, and downstream model evaluation — is the target of the Phase 4–7 roadmap.
+### 4.4 Verification
 
----
+After extraction, Ethos can optionally run a **comprehension panel**.
 
-## 6. Applications and Industry Benefit
+This is one of the most important parts of the system. Three independent models are asked simple binary questions such as:
 
-### 6.1 Training Data for Value-Aligned Models
+- does the figure hold this value?
+- does the figure violate this value?
 
-The most direct application of Ethos output is as training data for language models undergoing value alignment.
+The models then vote. Majority agreement determines whether the signal is retained, relabeled, split, or discarded.
 
-Current RLHF pipelines train on preference rankings that do not distinguish between a model output preferred because it reflects genuine value alignment and one preferred because it is stylistically pleasing or culturally familiar. The Ethos corpus provides a different signal: what does value-aligned behavior look like when holding the value cost something? When the pressure to yield was present but the value held? That is the P1 class.
+This matters because it turns verification into a separate layer rather than burying it inside extraction. Rather than relying on a single model's interpretation, Ethos tests whether a value signal survives disagreement across independent models.
 
-Equally important: what does value failure look like from the inside? Not as an external judgment, but as a first-person account of rationalization, capitulation, and post-hoc justification? That is the P0 and APY class. A model trained on both classes can distinguish between genuine value demonstration and performance — a distinction scalar preference rankings cannot provide.
-
-### 6.2 Evaluation and Red-Teaming
-
-Beyond training, Ethos output supports evaluation of existing models. A corpus of historically documented APY sequences — where external pressure was applied and values eroded — serves as a red-teaming dataset: can a model identify the value failure in a passage? Can it recognize the APY dynamic? Can it distinguish between a figure holding a value under pressure and a figure performing the holding without the pressure being real?
-
-These evaluations are not supported by current benchmarks because they lack the APY category and the resistance dimension.
-
-### 6.3 Scale and Diversity
-
-The historical record is not small. The Library of Congress holds more than 170 million items. Project Gutenberg contains more than 60,000 public domain works. Published diaries, letters, court transcripts, and biographical accounts from thousands of documented historical figures across every major culture and historical period are available in digital form.
-
-Ethos is designed to process any UTF-8 text. A researcher can ingest Marcus Aurelius's *Meditations*, Frederick Douglass's autobiographical writings, Hannah Arendt's letters to Karl Jaspers, Richard Nixon's Oval Office transcripts, and Simone de Beauvoir's journals — each with the appropriate document type — and produce a corpus spanning two millennia, multiple continents, and radically different historical contexts, all scored on the same resistance framework. That temporal and cultural breadth is a form of diversity that annotator-sourced datasets cannot replicate.
+In other words, Ethos does not only extract signals. It also creates a path for validating them across model disagreement.
 
 ---
 
-## 7. Limitations
+## 5. Main Concepts
 
-### 7.1 Keyword Vocabulary Coverage
+### 5.1 Resistance
 
-The keyword vocabulary captures value signal well for direct, first-person English expression. It systematically under-detects value demonstrations that are indirect ("I gave him everything I had" signals commitment without using any commitment keyword), translated (texts originally in Greek or Arabic may express values in translated English that avoids standard keyword forms), or period-specific ("I will not flinch" does not contain any current integrity keyword but clearly expresses it). Phase 2 addresses this through embedding-based clustering, which generalizes across paraphrase, translation, and historical diction.
+**Resistance** is Ethos's term for the apparent cost of maintaining a value in context.
 
-### 7.2 Resistance Score Calibration
+The central idea is straightforward: not all value expressions carry the same evidential weight.
 
-The resistance formula is a principled heuristic, not a validated psychological measure. The document type bonuses are motivated by performance theory but have not been empirically calibrated against independent assessments of behavioral authenticity. The significance score is researcher-assigned and subject to researcher judgment. These limitations are partially mitigated by reproducibility: given agreed inputs, all downstream scores are deterministic and auditable.
+Saying "honesty matters" in a low-stakes setting is weak evidence.
 
-### 7.3 Historical Corpus Bias
+Remaining honest when it risks punishment, loss of status, or personal harm is stronger evidence.
 
-The historical record systematically overrepresents figures with high social status, Western and literate cultures, figures in public life, and positively-regarded figures whose writings were collected and preserved. Ethos partially addresses the last bias through the spectrum principle — deliberate inclusion of figures with complex or negative reputations — but cannot address the underlying preservation bias in what survives as historical record.
+Abandoning honesty under that same pressure may be the most informative negative signal.
 
-### 7.4 Static Value Profiles
+Examples of resistance include:
 
-The current pipeline treats each passage independently. Value trajectory — the arc from early Malcolm X to late Malcolm X — is visible in the registry as an accumulation of observations but is not explicitly modeled as a temporal sequence. Temporal sub-sessions (Section 8.2) are the planned architectural resolution.
+- risk of punishment or imprisonment
+- reputational damage or public backlash
+- physical danger or threat
+- conflict with personal interest or group loyalty
+
+Ethos does not treat these as noise to be removed. It treats them as part of the signal itself.
+
+The resistance score is not a final or validated psychological measure. It is an explicit heuristic for ranking how costly a value appears to be in context. Its purpose is to distinguish between:
+
+- values expressed when nothing is at stake
+- values maintained when something real is at risk
+
+That distinction is central to the project.
+
+### 5.2 P1, P0, and APY
+
+Ethos uses three main label classes:
+
+- **P1**: the value is held
+- **P0**: the value fails or is corrupted
+- **APY**: the value fails under identified pressure
+
+This is meant to capture more than simple positive versus negative sentiment. It captures value maintenance, value failure, and value yield under pressure as related but distinct patterns.
+
+### 5.3 Document Type
+
+Not all sources carry the same evidential weight.
+
+Ethos distinguishes between:
+
+- documented actions
+- journals
+- letters
+- speeches
+
+The intuition is simple: a private journal entry usually involves less performance pressure than a public speech. Document type therefore affects the resistance score and export weighting.
+
+### 5.4 Spectrum Principle
+
+Ethos does not pre-label figures as morally positive or morally negative. The same pipeline processes Gandhi and Nixon, Lincoln and Churchill, Marcus Aurelius and Malcolm X. Profiles are supposed to emerge from evidence rather than reputation labels.
+
+This is a strong design choice for the project. It reduces shortcut learning based on status and pushes the system toward context-sensitive judgment.
 
 ---
 
-## 8. Future Work
+## 6. Preliminary Results
 
-### 8.1 Original-Language Scoring
+The current results should be understood as pilot evidence, not final validation.
 
-The most significant limitation is that scoring currently runs on translated text rather than the figure's own language. Multilingual embedding models — LaBSE (Feng et al., 2022), multilingual-E5 — map semantically equivalent sentences across languages to neighboring points in a shared space. Value prototype vectors built from English seed examples generalize to Greek, Arabic, Latin, Japanese, and Chinese without a translation step, enabling native-language ingestion and eliminating translator bias structurally.
+### 6.1 Multi-Figure Pilot
 
-### 8.2 Temporal Value Arcs
+Pilot extraction across Gandhi, Lincoln, and Marcus Aurelius suggests that the pipeline can detect recurring values across widely separated historical contexts.
 
-Decade-partitioned sub-sessions (`figure:malcolm_x:1960s`) would expose value trajectory — how a figure's weights, resistance means, and consistency scores evolve across life stages — while maintaining the lifetime aggregate profile. A new `value_trajectory()` query returns the chronological sequence of registry snapshots. This enables a developmental calibration capability currently absent from all alignment datasets: the relationship between accumulated experience and value stability.
+Five values appeared in all three pilot figures:
 
-### 8.3 Hybrid Detection with Agreement Confidence
+- commitment
+- resilience
+- fairness
+- courage
+- humility
 
-Replacing binary keyword matching with a hybrid score combining keyword signal and embedding cosine similarity (`hybrid = α×keyword + (1−α)×embedding`) and reporting `agreement_confidence = 1.0 − |keyword − embedding|` converts disagreement between detection methods into a quality signal. High-agreement observations become the strongest training examples; low-agreement observations are flagged for review. This also provides a continuous vocabulary improvement mechanism: embedding-only detections that are subsequently validated become candidates for keyword list addition.
+This is encouraging, though not yet enough to make strong claims about universality or cross-cultural robustness.
 
-### 8.4 Corpus Composition Balancing
+### 6.2 Gandhi Full-Pipeline Test
 
-A corpus balance tool reporting current P1:P0:APY ratios and figure-type composition, with a recommended 1:4 ratio of canonically virtuous to complex middle-ground figures, prevents the corpus from inheriting the historical record's preservation bias toward celebrated figures. Export-time inverse-frequency weighting allows training data balance to be adjusted without re-ingesting.
+In a 12-passage Gandhi sample, a full-pipeline run produced:
 
-### 8.5 Verum: Commercial Evaluation Layer
+- 46 observations across 12 values
+- 38 of 46 retained by the comprehension panel
+- a reduction in apparent false-positive P0 signals after panel verification
 
-Ethos as a standalone corpus engine supports a companion evaluation product (Verum) — a REST API that scores AI model outputs against the historical behavioral record. An output claiming "I will always be honest regardless of consequences" can be surfaced against corpus examples of figures who made equivalent commitments and held them (P1) and figures who held them initially and then failed under documented pressure (APY). This converts the Ethos corpus from a training resource into a live behavioral evaluation layer — a "Verified by Verum" certification pathway for models whose value claims can be tested against documented human behavior at scale.
+These results suggest that the layered approach is technically workable and that the comprehension panel may improve precision. They do not yet show that Ethos improves downstream alignment performance.
+
+That next step remains open.
 
 ---
 
-## 9. Conclusion
+## 7. What Is New Here
 
-The central problem with current value-alignment datasets is not their size or methodology — it is their source material. Hypothetical scenarios capture declared values. Preference rankings capture momentary aesthetic judgment. Neither captures what human values actually look like when they are tested: when holding them costs something, when external pressure is applied, when the easy choice is abandonment and the hard choice is maintenance.
+Ethos is not simply another moral text classifier. It represents a shift in what counts as alignment data.
 
-Ethos addresses this gap by turning to the one source of evidence that captures values under real conditions: documented human history. The historical record contains thousands of first-person accounts of values demonstrated, failed, and abandoned under circumstances ranging from mortal threat to political convenience to intimate betrayal. That evidence has never been systematically extracted, scored for resistance, and labeled for value alignment training purposes.
+Most existing approaches focus on judgment: what people say is right, or how they evaluate model outputs. Ethos shifts the focus toward behavior: what people actually did when values were tested.
 
-We have described a pipeline that does this extraction: deterministic in its core layers, auditable at every step through source chain tracking, and designed around four novel contributions — the resistance score, the spectrum principle, the two-axis polarity model, and the comprehension panel — that distinguish Ethos from all existing approaches. We have further described and implemented quality extensions — cross-passage APY detection, keyword context disambiguation, value co-occurrence and tension modeling, observation consistency scoring, pronoun-aware phrase analysis, and corpus quality gating — that address the most significant structural limitations of the base pipeline.
+Its novelty lies in the combination of:
 
-The APY class deserves particular emphasis. A value held at cost is strong signal. A value abandoned under identified external pressure is the strongest negative signal. The dynamics of that failure — the gap between pressure and capitulation, the rationalizations that accompany it, the figures who held longer before yielding versus those who yielded immediately — are the behavioral evidence that alignment research most needs and currently lacks entirely. Ethos is the first pipeline designed to extract it.
+**Behavior-first source material**  
+Not hypothetical scenarios, but documented human conduct under real conditions.
 
-The resistance score encodes the insight that a value held at cost is strong signal and a value held at no cost is weak signal. The spectrum principle encodes the insight that the most useful training data lives not in the celebrated virtuous or the documented villains but in the complex majority of historical figures — people who demonstrated courage in some domains and failure in others, whose value profiles were asymmetric, whose moral lives looked like human moral lives actually look.
+**Resistance-weighted evidence**  
+Values are not treated as binary labels, but as signals whose strength depends on the cost of maintaining them.
 
-The historical record is not a perfect source. It is biased, incomplete, mediated by the choices of those who preserved it. But it contains something that no annotation task can manufacture: real stakes. Real consequences. Real people choosing to hold or abandon their values when it mattered.
+**Pressure-aware failure modeling (APY)**  
+Failures under pressure are treated as a distinct and informative class, rather than collapsed into generic negatives.
 
-That is the signal alignment research needs most. Ethos is a framework for extracting it.
+**No pre-labeling of figures**  
+Moral profiles emerge from observed behavior rather than reputation or category assignment.
+
+**Independent verification through model disagreement**  
+The comprehension panel introduces a separate validation layer, where signals must survive scrutiny across multiple models.
+
+Taken together, these changes shift alignment data from:
+
+- static labels -> contextual behavior
+- stated preference -> observed evidence
+- hypothetical scenarios -> historical reality
+
+Ethos is best understood not as a classifier, but as infrastructure for compiling behavior-grounded alignment data.
+
+---
+
+## 8. Limitations
+
+Ethos has important limitations.
+
+### 8.1 The value schema is still a schema
+
+Even if grounded in established psychology frameworks, the 15-value vocabulary is still a chosen structure. It is a practical starting point, not a discovered universal map of morality.
+
+### 8.2 Resistance is a heuristic
+
+The resistance score is useful as an operational variable, but it is not yet a validated measure. It needs calibration, testing, and external comparison.
+
+### 8.3 Historical evidence is biased
+
+The historical record overrepresents literate, high-status, preserved figures and underrepresents countless others. Ethos can mitigate some of this through corpus design, but it cannot remove preservation bias.
+
+### 8.4 Validation remains the real test
+
+To justify stronger claims, Ethos still needs:
+
+- inter-annotator comparison
+- ablation studies
+- systematic error analysis
+- downstream model evaluation
+
+At present, the evidence supports feasibility, not final efficacy.
+
+---
+
+## 9. Future Work
+
+The next steps are clear.
+
+### 9.1 Broader Corpus Testing
+
+The pipeline should be run across many more figures, cultures, eras, and source types.
+
+### 9.2 Original-Language Support
+
+Native-language processing could reduce translation bias and improve cross-cultural coverage.
+
+### 9.3 Temporal Value Arcs
+
+Ethos should eventually model how a figure's value profile changes over time, not only how values appear in isolated passages.
+
+### 9.4 Downstream Alignment Evaluation
+
+The most important unresolved question is whether Ethos-built data improves model behavior, evaluation quality, or red-team coverage in practice.
+
+That is the test that ultimately matters.
+
+---
+
+## 10. Conclusion
+
+Current alignment datasets are strong at capturing stated judgments and preferences. They are weaker at capturing what values look like when they are tested.
+
+Ethos is an attempt to build that missing layer.
+
+It does so by treating documented human behavior as a potential source of alignment data, by treating resistance as a meaningful variable, by separating failure under pressure from failure in general, and by validating extracted signals through independent model voting.
+
+The larger promise of Ethos is not that it solves alignment. It is that it may change the kind of data we use to approach it.
+
+If alignment needs more than rules, more than preferences, and more than hypotheticals, then it may also need datasets built from real human conduct under real stakes.
+
+If alignment depends on understanding how values behave under pressure, then datasets that exclude that condition may be systematically incomplete.
+
+Ethos treats history as training data for values.
+
+That is the possibility Ethos is trying to test.
 
 ---
 
@@ -375,13 +386,13 @@ Bai, Y., Kadavath, S., Kundu, S., Askell, A., et al. (2022). Constitutional AI: 
 
 Feng, F., Yang, Y., Cer, D., Arivazhagan, N., & Wang, W. (2022). Language-agnostic BERT sentence embedding. In *Proceedings of ACL 2022*.
 
-Fulgoni, D., Carpenter, J., Ungar, L., & Preoțiuc-Pietro, D. (2016). An empirical exploration of moral foundations theory in partisan news sources. In *Proceedings of LREC 2016*.
+Fulgoni, D., Carpenter, J., Ungar, L., & Preotiuc-Pietro, D. (2016). An empirical exploration of moral foundations theory in partisan news sources. In *Proceedings of LREC 2016*.
 
-Haidt, J. (2001). The emotional dog and its rational tail: A social intuitionist approach to moral judgment. *Psychological Review, 108*(4), 814–834.
+Haidt, J. (2001). The emotional dog and its rational tail: A social intuitionist approach to moral judgment. *Psychological Review, 108*(4), 814-834.
 
 Haidt, J. (2012). *The Righteous Mind: Why Good People Are Divided by Politics and Religion*. Pantheon Books.
 
-Haidt, J., & Joseph, C. (2004). Intuitive ethics: How innately prepared intuitions generate culturally variable virtues. *Daedalus, 133*(4), 55–66.
+Haidt, J., & Joseph, C. (2004). Intuitive ethics: How innately prepared intuitions generate culturally variable virtues. *Daedalus, 133*(4), 55-66.
 
 Hendrycks, D., Burns, C., Basart, S., Critch, A., Li, J., Song, D., & Steinhardt, J. (2021). Aligning AI with shared human values. In *Proceedings of ICLR 2021*.
 
@@ -391,12 +402,12 @@ Kenton, Z., Everitt, T., Weidinger, L., Gabriel, I., Garfinkel, B., & Irving, G.
 
 Klinger, R., de Clercq, O., Mohammad, S., & Balahur, A. (2021). IEST: WASSA-2018 implicit emotions shared task. In *Proceedings of EMNLP Workshop*.
 
-Milgram, S. (1963). Behavioral study of obedience. *Journal of Abnormal and Social Psychology, 67*(4), 371–378.
+Milgram, S. (1963). Behavioral study of obedience. *Journal of Abnormal and Social Psychology, 67*(4), 371-378.
 
 Ouyang, L., Wu, J., Jiang, X., Almeida, D., et al. (2022). Training language models to follow instructions with human feedback. In *Proceedings of NeurIPS 2022*.
 
 Peterson, C., & Seligman, M. E. P. (2004). *Character Strengths and Virtues: A Handbook and Classification*. Oxford University Press.
 
-Schwartz, S. H. (1992). Universals in the content and structure of values: Theoretical advances and empirical tests in 20 countries. *Advances in Experimental Social Psychology, 25*, 1–65.
+Schwartz, S. H. (1992). Universals in the content and structure of values: Theoretical advances and empirical tests in 20 countries. *Advances in Experimental Social Psychology, 25*, 1-65.
 
-Schwartz, S. H., & Rubel, T. (2005). Sex differences in value priorities: Cross-cultural and multimethod studies. *Journal of Personality and Social Psychology, 89*(6), 1010–1028.
+Schwartz, S. H., & Rubel, T. (2005). Sex differences in value priorities: Cross-cultural and multimethod studies. *Journal of Personality and Social Psychology, 89*(6), 1010-1028.

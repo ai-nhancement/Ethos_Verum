@@ -95,6 +95,9 @@ class TestTierDetermination:
         assert q["confidence_tier"] == "preliminary"
 
     def test_zero_docs_not_approved(self, val_db):
+        # approved_for_export=False even for legacy 0-doc figures — the export gate
+        # separately special-cases docs==0 and allows them through; callers that check
+        # approved_for_export directly will still see False for these figures.
         db_path, _ = val_db
         q = get_figure_corpus_quality(db_path, "nobody")
         assert q["approved_for_export"] is False
@@ -357,6 +360,22 @@ class TestGetAllCorpusQuality:
         result = get_all_corpus_quality(str(tmp_path / "ghost.db"))
         assert isinstance(result, list)
 
+    def test_figure_in_both_tables_not_returned_twice(self, val_db):
+        """A figure with rows in both figure_documents and figure_sources appears once."""
+        db_path, vs = val_db
+        # Register via ValueStore (puts row in figure_sources)
+        vs.register_figure_source("figure:dup_fig:0", "dup_fig", "speech", 5)
+        # Also add a figure_documents entry
+        _insert_doc(db_path, "dup_fig", "Speech A", "speech")
+        _insert_doc(db_path, "dup_fig", "Journal A", "journal")
+        _insert_doc(db_path, "dup_fig", "Letter A",  "letter")
+
+        result = get_all_corpus_quality(db_path)
+        dup_entries = [r for r in result if r["figure_name"] == "dup_fig"]
+        assert len(dup_entries) == 1, (
+            f"Expected 1 entry for dup_fig, got {len(dup_entries)}: {dup_entries}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # register_figure_document() — deduplication
@@ -481,79 +500,121 @@ class TestExportCorpusGate:
         }
 
     def test_blocked_figure_observations_removed(self, obs_db):
-        from cli.export import export as run_export
+        from cli.export import export as run_export, build_training_records as _orig_build
 
         def fake_quality(db_path, fig):
             if fig == "blocked_fig":
                 return self._quality("preliminary", docs=1, types=1)
             return self._quality("confident", docs=3)
 
-        with patch("core.corpus.get_figure_corpus_quality", side_effect=fake_quality):
-            result = run_export(
+        captured_obs = []
+
+        def capturing_build(obs, *a, **kw):
+            captured_obs.extend(obs)
+            return _orig_build(obs, *a, **kw)
+
+        with patch("core.corpus.get_figure_corpus_quality", side_effect=fake_quality), \
+             patch("cli.export.build_training_records", side_effect=capturing_build):
+            run_export(
                 db_path=obs_db,
                 output_dir=None,
                 dry_run=True,
                 require_corpus_quality=True,
                 force=False,
             )
-        # blocked_fig excluded; warned/ok remain — non-negative record count
-        assert result >= 0
+
+        figure_names = {o.get("figure_name") for o in captured_obs}
+        assert "blocked_fig" not in figure_names, (
+            f"blocked_fig observations should have been removed by gate, got: {figure_names}"
+        )
+        assert {"warned_fig", "ok_fig"} <= figure_names, (
+            f"Non-blocked figures should pass through, got: {figure_names}"
+        )
 
     def test_force_keeps_blocked_figures_in_output(self, obs_db):
-        # force=True bypasses the gate FILTER — blocked figures are not excluded.
-        # (The annotation loop still calls get_figure_corpus_quality for corpus_confidence.)
-        from cli.export import export as run_export
+        """
+        force=True bypasses the gate FILTER — all figures' observations reach
+        build_training_records regardless of their quality tier.
+        """
+        from cli.export import export as run_export, build_training_records as _orig_build
 
         def all_preliminary(db_path, fig):
             return self._quality("preliminary", docs=1)
 
-        with patch("core.corpus.get_figure_corpus_quality", side_effect=all_preliminary):
-            result = run_export(
+        captured_obs = []
+
+        def capturing_build(obs, *a, **kw):
+            captured_obs.extend(obs)
+            return _orig_build(obs, *a, **kw)
+
+        with patch("core.corpus.get_figure_corpus_quality", side_effect=all_preliminary), \
+             patch("cli.export.build_training_records", side_effect=capturing_build):
+            run_export(
                 db_path=obs_db,
                 output_dir=None,
                 dry_run=True,
                 require_corpus_quality=True,
                 force=True,
             )
-        # With force=True, all 3 figures pass → 3 records (or ≥0 if threshold filters)
-        assert result >= 0
+
+        figure_names = {o.get("figure_name") for o in captured_obs}
+        assert {"blocked_fig", "warned_fig", "ok_fig"} <= figure_names, (
+            f"force=True should pass all figures through gate, got: {figure_names}"
+        )
 
     def test_no_corpus_gate_keeps_blocked_figures_in_output(self, obs_db):
-        # require_corpus_quality=False: gate filter skipped entirely.
-        from cli.export import export as run_export
+        """require_corpus_quality=False: gate filter skipped entirely."""
+        from cli.export import export as run_export, build_training_records as _orig_build
 
-        def all_preliminary(db_path, fig):
-            return self._quality("preliminary", docs=1)
+        captured_obs = []
 
-        with patch("core.corpus.get_figure_corpus_quality", side_effect=all_preliminary):
-            result = run_export(
+        def capturing_build(obs, *a, **kw):
+            captured_obs.extend(obs)
+            return _orig_build(obs, *a, **kw)
+
+        with patch("cli.export.build_training_records", side_effect=capturing_build):
+            run_export(
                 db_path=obs_db,
                 output_dir=None,
                 dry_run=True,
                 require_corpus_quality=False,
             )
-        assert result >= 0
+
+        figure_names = {o.get("figure_name") for o in captured_obs}
+        assert {"blocked_fig", "warned_fig", "ok_fig"} <= figure_names, (
+            f"Without gate, all figures should reach build_training_records, got: {figure_names}"
+        )
 
     def test_legacy_figures_pass_through_gate(self, obs_db):
         """
-        Figures with document_count=0 (legacy ingests) must not be blocked.
-        Only figures with docs>0 in the preliminary tier are blocked.
+        Figures with document_count=0 (legacy ingests, no --doc-title used) must
+        not be blocked. Only preliminary figures with docs>0 are blocked.
         """
-        from cli.export import export as run_export
+        from cli.export import export as run_export, build_training_records as _orig_build
 
         def legacy_quality(db_path, fig):
             return self._quality("preliminary", docs=0)
 
-        with patch("core.corpus.get_figure_corpus_quality", side_effect=legacy_quality):
-            result = run_export(
+        captured_obs = []
+
+        def capturing_build(obs, *a, **kw):
+            captured_obs.extend(obs)
+            return _orig_build(obs, *a, **kw)
+
+        with patch("core.corpus.get_figure_corpus_quality", side_effect=legacy_quality), \
+             patch("cli.export.build_training_records", side_effect=capturing_build):
+            run_export(
                 db_path=obs_db,
                 output_dir=None,
                 dry_run=True,
                 require_corpus_quality=True,
                 force=False,
             )
-        # Legacy figures not blocked → non-negative record count
-        assert result >= 0
+
+        figure_names = {o.get("figure_name") for o in captured_obs}
+        assert len(figure_names) > 0, (
+            "Legacy figures (docs=0) should not be blocked and should reach build_training_records"
+        )
 
     def test_corpus_confidence_annotated_on_records(self, obs_db):
         from cli.export import export as run_export, build_training_records
@@ -578,10 +639,17 @@ class TestExportCorpusGate:
                 require_corpus_quality=True,
             )
 
-        if records:
-            assert all("corpus_confidence" in r for r in records)
-            assert all(r["corpus_confidence"] in ("preliminary", "partial", "confident")
-                       for r in records)
+        assert len(records) > 0, (
+            "Expected training records to verify corpus_confidence annotation"
+        )
+        assert all("corpus_confidence" in r for r in records), (
+            f"Missing corpus_confidence in: {[r for r in records if 'corpus_confidence' not in r]}"
+        )
+        # Mock returns "confident" for every figure — annotation must propagate that value
+        assert all(r["corpus_confidence"] == "confident" for r in records), (
+            f"Expected all records to have corpus_confidence='confident', got: "
+            f"{set(r['corpus_confidence'] for r in records)}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -601,3 +669,11 @@ class TestCorpusQualityConstants:
     def test_confident_requires_more_types_than_one(self):
         # The tier requires at least 2 types — single-type corpora can't be confident
         assert CORPUS_MIN_TYPES_CONFIDENT > 1
+
+    def test_confident_docs_threshold_absolute_minimum(self):
+        # Semantic guarantee: confident requires at least 3 documents
+        assert CORPUS_MIN_DOCS_CONFIDENT >= 3
+
+    def test_type_threshold_absolute_minimum(self):
+        # Semantic guarantee: confident requires at least 2 distinct doc types
+        assert CORPUS_MIN_TYPES_CONFIDENT >= 2

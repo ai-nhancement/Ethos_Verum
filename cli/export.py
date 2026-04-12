@@ -362,7 +362,7 @@ def build_training_records(
         # pressure context the panel does not see.
         obs_source   = str(obs.get("source", ""))
         obs_polarity = int(obs.get("value_polarity", 0))
-        if "+panel" in obs_source and obs_polarity != 0 and label != "APY":
+        if "panel" in obs_source.split("+") and obs_polarity != 0 and label != "APY":
             if obs_polarity == 1 and label != "P1":
                 label      = "P1"
                 reason     = "panel_confirmed_p1"

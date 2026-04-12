@@ -1,12 +1,12 @@
 # Ethos — Project Status
 
 > **System class:** Universal Value Extraction Pipeline (UVEP)
-> **Core claim:** Human values are behavioral patterns — extractable from documented history using deterministic computation, verifiable through accumulation.
-> **Destination:** A universal, empirically-derived ethics corpus built from the full human spectrum — not hypotheticals, not hagiography, not monsters alone.
+> **Core claim:** Human values are behavioral patterns — extractable from documented human conduct using deterministic computation, verifiable through accumulation. The source can be historical or contemporary, famous or anonymous, elite or ordinary.
+> **Destination:** A universal, empirically-derived ethics corpus built from the full human spectrum — not hypotheticals, not hagiography, not monsters alone, and not limited to the historically prominent.
 >
 > *"We didn't invent values. We extracted them from people who lived them — and people who didn't."*
 
-**Last Updated:** 2026-03-18 (Comprehension panel + phrase layer + polarity layer complete)
+**Last Updated:** 2026-03-21 (Verum integration — scoring, certification, API routes, frontend)
 **Version:** Living document — update whenever a phase completes or design changes.
 
 ---
@@ -15,11 +15,11 @@
 
 Most value-alignment datasets are built from the poles: celebrated virtuous figures and documented villains. That produces models that recognize virtue performance and villainy — not the moral complexity of actual human behavior.
 
-**The gap:** the middle ground. JFK. MLK. Malcolm X. Churchill. Nixon. Oppenheimer. Figures of real consequence with asymmetric value profiles — high in some dimensions, failing in others, under real pressure across all of them.
+**The gap:** the middle ground. Not just famous figures with asymmetric value profiles — JFK, Churchill, Oppenheimer — but the entire range of human experience: the single parent holding a job they hate for their kids' stability, the worker who stayed silent when they saw something wrong, the teenager navigating peer pressure. Everyone has values. Everyone faces pressure. The behavioral signal is in the conduct, not the fame.
 
 Ethos fills that gap.
 
-The pipeline works from **documented behavior under real conditions** — not hypotheticals, not preference rankings, not moral philosophy. A value stated in comfort is weak signal. A value demonstrated at cost — under threat, under pressure, against interest — is strong signal.
+The pipeline works from **documented behavior under real conditions** — historical or contemporary, famous or anonymous — not hypotheticals, not preference rankings, not moral philosophy. A value stated in comfort is weak signal. A value demonstrated at cost — under threat, under pressure, against interest — is strong signal.
 
 The resistance score measures that cost. The document type calibrates the authenticity of the evidence. The P1/P0/APY classification labels whether the value held.
 
@@ -452,6 +452,78 @@ python -m cli.dataset_card --output DATASET_CARD.md
 **Goal:** Port AiMe's Self-Reflection Layer to Ethos — enabling behavioral trait compilation and the RIC gate for evaluating AI model outputs.
 
 **Use case:** Evaluate AI model outputs against the Ethos value corpus. Detect when a model's behavioral patterns match known failure modes.
+
+---
+
+## Verum Integration ✅ (2026-03-21)
+
+**Goal:** Add Verum — a value alignment scoring and certification layer — directly into Ethos so both share a single deployment and a single `values.db`.
+
+**Core idea:** Verum scores arbitrary text samples against the Ethos value corpus using the same `extract_value_signals` + `compute_resistance` pipeline, then issues deterministic signed certificates for entities that meet a configurable evidence threshold.
+
+### Architecture
+
+Verum lives inside Ethos. No separate process, no separate database.
+
+| File | Role |
+|------|------|
+| `core/verum.py` | Scoring (`score_text`) and certification (`certify`) logic. Imports from `core.value_extractor`, `core.resistance`, `cli.export`. No LLM calls. |
+| `api/verum_routes.py` | FastAPI router — 5 endpoints under `/verum` prefix. |
+| `api/models.py` | Pydantic models: `VerumScoreRequest/Response`, `VerumCertifyRequest`, `VerumCertificateResponse`, `VerumCertificateListResponse`, `VerumValuesResponse`. |
+| `static/verum.html` | Frontend product page, served at `GET /verum`. |
+| `static/media/verum_logo.png` | Verum branding. |
+
+`core/value_store.py` gained a `verum_certificates` table and three methods:
+- `store_certificate(cert)` — persist a signed certificate
+- `get_certificate(certificate_id)` — retrieve by ID
+- `list_certificates(entity_name=None, limit=20)` — list with optional entity filter
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/verum` | Verum product page (HTML) |
+| `GET` | `/verum/values` | List all 15 values with descriptions |
+| `POST` | `/verum/score` | Score a text sample against the value corpus |
+| `POST` | `/verum/certify` | Issue a signed certificate for an entity |
+| `GET` | `/verum/certificate/{cert_id}` | Retrieve a certificate by ID |
+| `GET` | `/verum/certificates` | List certificates (optional `entity` filter) |
+
+### Verum Score Formula
+
+```
+verum_score = P1_ratio × avg_P1_resistance
+```
+
+- `P1_ratio` — fraction of value signals classified as P1 (held under resistance ≥ p1_threshold)
+- `avg_P1_resistance` — mean resistance score of those P1 signals
+
+Score range: 0.0–1.0. A high score requires both high P1 rate AND high resistance — signals extracted under real pressure, not comfortable assertions.
+
+### Certificate Signature
+
+Deterministic SHA-256 over all certification parameters:
+
+```python
+sig_input = json.dumps({
+    "entity_name", "samples", "overall_score", "values_certified",
+    "issued_at", "doc_type", "p1_threshold", "p0_threshold",
+    "min_score", "min_values"
+}, sort_keys=True)
+signature = "sha256:" + hashlib.sha256(sig_input.encode()).hexdigest()
+```
+
+All five threshold parameters are included so a certificate cannot be reissued with lenient thresholds and produce the same signature.
+
+### Bugs Fixed During Audit
+
+| Bug | Fix |
+|-----|-----|
+| Original signature only covered `entity/samples/score/values/issued_at` — threshold manipulation undetectable | Signature now includes all 5 certification threshold parameters |
+| `p0_threshold < p1_threshold` constraint not enforced | Added `@model_validator` to both `VerumScoreRequest` and `VerumCertifyRequest` |
+| `cross-session consistency` always returned 0.5 — `upsert_registry(session_id="")` queried observations with `session_id=''` (none exist) | Added `lookup_session_id` parameter to redirect the query to the real session |
+| `get_figures_list()` `top_value` used `MAX(value_name)` (alphabetical last) | Fixed with correlated subquery `ORDER BY weight DESC LIMIT 1` |
+| `record_observation()` could write duplicate rows on re-ingestion | Added `(session_id, record_id, value_name)` dedup check before INSERT |
 
 ---
 

@@ -20,9 +20,9 @@
 
 ---
 
-**Ethos** extracts behavioral evidence of human values from historical documents and produces labeled training data for AI alignment research. **Verum** scores and certifies whether text demonstrates those values under pressure.
+**Ethos** extracts behavioral evidence of human values from documented human conduct and produces labeled training data for AI alignment research. **Verum** scores and certifies whether text demonstrates those values under pressure.
 
-A value stated in comfort is weak signal. A value demonstrated at personal cost, under threat, under pressure, against interest, is strong signal. Ethos measures that cost. Verum certifies it.
+The pipeline is source-agnostic: it processes historical archives, contemporary journals, personal blogs, interview transcripts, social media posts, conversational records, or any text associated with an identifiable person. A value stated in comfort is weak signal. A value demonstrated at personal cost — under threat, under pressure, against interest — is strong signal. Ethos measures that cost. Verum certifies it.
 
 ---
 
@@ -35,9 +35,9 @@ Most value-alignment work in AI is built on shaky ground:
 - RLHF measures preference, not principle
 - Constitutional AI encodes rules from the top down, not evidence from the bottom up
 
-Ethos goes to the source: documented human behavior under real conditions. The resistance score measures what nobody else is measuring systematically, the cost of holding a value when it would be easier not to.
+Ethos goes to the source: documented human behavior under real conditions — from any era, any social position, any medium. The same pipeline processes a letter written by Abraham Lincoln in 1863 and a blog post written by a nurse in 2025. The resistance score measures what nobody else is measuring systematically: the cost of holding a value when it would be easier not to.
 
-When Ethos flags a value signal, the answer to "why?" traces back to a real person, a real moment, and a real cost.
+When Ethos flags a value signal, the answer to "why?" traces back to a real person, a real moment, and a real cost. That person can be a head of state or a line cook. The behavioral signal is in the conduct, not the fame.
 
 ---
 
@@ -69,9 +69,9 @@ When Ethos flags a value signal, the answer to "why?" traces back to a real pers
 
 Text is segmented into sentence-bounded passages. Each passage is stored with metadata:
 
-- **Document type** (journal, letter, speech, action) affects resistance scoring. Private writing scores higher than public speech. Documented behavior scores highest.
+- **Document type** (journal, letter, blog, speech, action) affects resistance scoring. Private writing scores higher than public speech. Documented behavior scores highest.
 - **Source authenticity** tracks whether the text is original (1.0), translated (0.85), or uncertain (0.70).
-- **Publication year** drives a temporal discount for archaic texts.
+- **Publication year** drives a temporal discount for archaic texts. Contemporary sources receive no discount.
 
 ### 2. Multi-Layer Extraction
 
@@ -141,11 +141,16 @@ Consistency is a 4-component score:
 pip install -r requirements.txt
 ```
 
-### Ingest a figure
+### Ingest a source
 
 ```bash
+# Historical figure
 python -m cli.ingest --figure gandhi --file gandhi_journal.txt \
     --doc-type journal --pronoun he
+
+# Contemporary source
+python -m cli.ingest --figure maria --file maria_blog_2025.txt \
+    --doc-type blog --pronoun she
 
 # With translation penalty and publication year
 python -m cli.ingest --figure seneca --file seneca_letters.txt \
@@ -247,7 +252,7 @@ Each exported record is a JSONL line:
 
 ## Design Principles
 
-1. **Behavioral evidence over hypotheticals.** Extract from documented history, not surveys or preferences.
+1. **Behavioral evidence over hypotheticals.** Extract from documented human conduct — historical or contemporary — not surveys or preferences.
 2. **Cost-weighted signal.** High resistance = high informational value. A value demonstrated under threat is worth more than a value stated in comfort.
 3. **Document authenticity calibration.** Private writing > public speech. Observed behavior > stated belief.
 4. **Deterministic reproducibility.** No randomness. Same input + same weights = same output.

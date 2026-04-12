@@ -149,6 +149,21 @@ class ValueStore:
             );
             CREATE INDEX IF NOT EXISTS idx_apyctx_session
                 ON apy_context(session_id, ts DESC);
+
+            CREATE TABLE IF NOT EXISTS verum_certificates (
+                id               TEXT PRIMARY KEY,
+                entity_name      TEXT NOT NULL,
+                certified        INTEGER NOT NULL DEFAULT 0,
+                verum_score      REAL NOT NULL DEFAULT 0.0,
+                sample_count     INTEGER NOT NULL DEFAULT 0,
+                values_certified TEXT NOT NULL DEFAULT '[]',
+                issued_at        REAL NOT NULL,
+                figure_basis     TEXT,
+                signature        TEXT NOT NULL DEFAULT '',
+                payload          TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_verum_certs_entity
+                ON verum_certificates(entity_name, issued_at DESC);
         """)
         conn.commit()
         # Migration: add column to existing DBs (SQLite ignores if already present via try/except)
@@ -157,10 +172,8 @@ class ValueStore:
             "ALTER TABLE value_observations ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'unknown'",
             "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
-            "ALTER TABLE figure_sources ADD COLUMN pronoun TEXT NOT NULL DEFAULT 'unknown'",
-            "ALTER TABLE value_observations ADD COLUMN value_polarity INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE value_observations ADD COLUMN polarity_confidence REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE value_observations ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE figure_sources ADD COLUMN pronoun TEXT NOT NULL DEFAULT 'unknown'",
         ):
             try:
                 conn.execute(_migration)
@@ -718,6 +731,88 @@ class ValueStore:
             conn.commit()
         except Exception:
             _log.debug("prune_apy_context failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Verum certificates
+    # ------------------------------------------------------------------
+
+    def store_certificate(self, cert: Dict) -> None:
+        """Persist a Verum certificate. Fails silently."""
+        import json as _json
+        try:
+            conn = self._conn()
+            conn.execute(
+                """INSERT INTO verum_certificates
+                   (id, entity_name, certified, verum_score, sample_count,
+                    values_certified, issued_at, figure_basis, signature, payload)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    cert["certificate_id"],
+                    cert["entity_name"],
+                    1 if cert.get("certified") else 0,
+                    float(cert.get("verum_score", 0.0)),
+                    int(cert.get("sample_count", 0)),
+                    _json.dumps(cert.get("values_certified", [])),
+                    float(cert.get("issued_at", 0.0)),
+                    cert.get("figure_basis"),
+                    cert.get("signature", ""),
+                    _json.dumps(cert),
+                ),
+            )
+            conn.commit()
+        except Exception:
+            _log.warning("store_certificate failed", exc_info=True)
+
+    def get_certificate(self, certificate_id: str) -> Dict:
+        """Retrieve a certificate by ID. Returns {} if not found."""
+        import json as _json
+        try:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT payload FROM verum_certificates WHERE id=?",
+                (certificate_id,),
+            ).fetchone()
+            return _json.loads(row["payload"]) if row else {}
+        except Exception:
+            _log.debug("get_certificate failed", exc_info=True)
+            return {}
+
+    def list_certificates(
+        self,
+        entity_name: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """List certificates, optionally filtered by entity_name."""
+        import json as _json
+        try:
+            conn = self._conn()
+            if entity_name:
+                rows = conn.execute(
+                    """SELECT id, entity_name, certified, verum_score, sample_count,
+                              values_certified, issued_at, figure_basis, signature
+                       FROM verum_certificates WHERE entity_name=?
+                       ORDER BY issued_at DESC LIMIT ?""",
+                    (entity_name, min(limit, 100)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id, entity_name, certified, verum_score, sample_count,
+                              values_certified, issued_at, figure_basis, signature
+                       FROM verum_certificates
+                       ORDER BY issued_at DESC LIMIT ?""",
+                    (min(limit, 100),),
+                ).fetchall()
+            result = []
+            for row in rows:
+                r = dict(row)
+                r["values_certified"] = _json.loads(r["values_certified"])
+                r["certified"] = bool(r["certified"])
+                r["certificate_id"] = r.pop("id")
+                result.append(r)
+            return result
+        except Exception:
+            _log.debug("list_certificates failed", exc_info=True)
+            return []
 
 
 # ------------------------------------------------------------------

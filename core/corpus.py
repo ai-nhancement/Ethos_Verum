@@ -33,6 +33,7 @@ def get_overview(doc_db_path: str, val_db_path: str) -> Dict:
       ingested_range,  # [earliest_ts, latest_ts] or None
     }
     """
+    vconn = dconn = None
     try:
         vconn = _open(val_db_path)
         dconn = _open(doc_db_path)
@@ -102,6 +103,7 @@ def get_figure_summaries(doc_db_path: str, val_db_path: str) -> List[Dict]:
       avg_resistance, avg_significance,
     }
     """
+    vconn = dconn = None
     try:
         vconn = _open(val_db_path)
         dconn = _open(doc_db_path)
@@ -169,6 +171,7 @@ def get_value_distribution(val_db_path: str) -> List[Dict]:
       avg_weight, avg_resistance, avg_significance,
     }
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         rows = vconn.execute(
@@ -217,6 +220,7 @@ def get_resistance_distribution(val_db_path: str) -> Dict:
       }
     }
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         rows = vconn.execute(
@@ -269,6 +273,7 @@ def get_cross_figure_values(val_db_path: str, min_figures: int = 2) -> List[Dict
     Return values that appear in at least min_figures distinct figures.
     These are the candidates for the universal value set.
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         rows = vconn.execute(
@@ -315,6 +320,7 @@ def get_significance_distribution(val_db_path: str) -> Dict:
       }
     }
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         rows = vconn.execute(
@@ -373,8 +379,10 @@ def get_figure_corpus_quality(val_db_path: str, figure_name: str) -> Dict:
     Return a corpus quality assessment for a single figure.
 
     Tiers:
-      "preliminary"  — 1 document (single source, low confidence)
-      "partial"      — 2 documents (better, but potentially skewed)
+      "preliminary"  — 0–1 documents. 0-doc figures are legacy ingests (no --doc-title
+                       was passed) and pass through the export gate; 1-doc figures are
+                       blocked until more documents are registered.
+      "partial"      — 2 documents (better, but potentially single-source skewed)
       "confident"    — 3+ documents across ≥2 doc_types (approved for export)
 
     Return dict:
@@ -385,6 +393,7 @@ def get_figure_corpus_quality(val_db_path: str, figure_name: str) -> Dict:
         notes: [str],   # human-readable warnings
       }
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         rows = vconn.execute(
@@ -458,6 +467,7 @@ def get_all_corpus_quality(val_db_path: str) -> List[Dict]:
     Return corpus quality for every figure that has any ingested documents,
     sorted by document_count DESC.
     """
+    vconn = None
     try:
         vconn = _open(val_db_path)
         figures = [
@@ -474,12 +484,13 @@ def get_all_corpus_quality(val_db_path: str) -> List[Dict]:
                    )"""
             ).fetchall()
         ]
-        _safe_close(vconn)
-        results = [get_figure_corpus_quality(val_db_path, f) for f in figures + legacy]
-        return sorted(results, key=lambda r: -r["document_count"])
     except Exception:
         _log.warning("get_all_corpus_quality failed", exc_info=True)
         return []
+    finally:
+        _safe_close(vconn)
+    results = [get_figure_corpus_quality(val_db_path, f) for f in figures + legacy]
+    return sorted(results, key=lambda r: -r["document_count"])
 
 
 def get_full_report(doc_db_path: str, val_db_path: str) -> Dict:

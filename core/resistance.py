@@ -20,15 +20,17 @@ Formula (additive):
       the person ultimately capitulated (e.g., Galileo's forced recantation).
       +0.05 extra when hold language also present.
 
-    Tier B — High adversity (+0.28):
+    Tier B — High adversity (+0.36):
       Imprisonment, exile, persecution, direct threats, forced legal
       proceedings: "threatened to", "they can come for me", "oppressed",
       "at the hazard of", "advised by my lawyers", etc.
-      Suppressed when failure language is present without hold language
-      (prevents boosting passages where the person yielded under threat).
-      +0.05 extra when hold language also present.
+      Suppressed whenever failure language is present — hold language does
+      NOT prevent suppression at this tier (unlike Tier C). Rationale: a
+      direct-threat passage where the person ultimately yielded does not
+      warrant a high-adversity boost regardless of contradictory hold phrasing.
+      +0.05 extra when hold language is present and failure is absent.
 
-    Tier C — Standard adversity (+0.15):
+    Tier C — Standard adversity (+0.24):
       Moderate adversity phrases: "despite", "even though", "suffering",
       "not easy", "scared but", "ruined", etc.
       Suppressed when failure fires and hold does not.
@@ -47,7 +49,7 @@ Document type rationale (nudge, not primary driver):
   unknown — default
 
 Calibration (n=35, sig=0.70):
-  MAE ≈ 0.14 (vs. 0.32 for the prior additive formula)
+  MAE = 0.131 (vs. 0.142 before Tier B/C tuning; vs. 0.32 for the prior additive formula)
   Mortal tier cases (7 records): average error < 0.05
   Primary residual: perpetrator-high-resistance cases where text contains
   no personal adversity language (Himmler, Robespierre, Stalin) —
@@ -102,7 +104,7 @@ _HIGH_ADVERSITY_RE = re.compile(
     r"imprison(?:ed|ment)\b|jail(?:ed)?\b|detain(?:ed|ment)\b|"
     r"exil(?:e|ed)\b|banish(?:ed)?\b|expel(?:led)?\b|"
     r"persecuted?\b|persecution\b|"
-    r"oppressed\b|broken.hearted\b"
+    r"oppressed\b|broken[\s-]hearted\b"
     r")",
     re.IGNORECASE,
 )
@@ -168,8 +170,8 @@ _BASE           = 0.12   # floor before any bonuses
 _SIG_SCALE      = 0.17   # significance multiplier
 _SIG_CAP        = 0.12   # maximum significance contribution
 _MORTAL_BONUS   = 0.62   # Tier A bonus
-_HIGH_ADV_BONUS = 0.28   # Tier B bonus
-_ADV_BONUS      = 0.15   # Tier C bonus
+_HIGH_ADV_BONUS = 0.36   # Tier B bonus
+_ADV_BONUS      = 0.24   # Tier C bonus
 _HOLD_EXTRA     = 0.05   # extra when hold language co-occurs with any tier
 
 

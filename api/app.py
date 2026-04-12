@@ -1,7 +1,7 @@
 """
 api/app.py
 
-Ethos REST API — FastAPI application.
+Ethos + Verum REST API — FastAPI application.
 
 Endpoints:
   POST /figures/{name}/ingest   — ingest text for a figure
@@ -10,6 +10,13 @@ Endpoints:
   GET  /figures/universal       — cross-figure aggregate registry
   POST /export/ric              — trigger RIC export, return report
 
+  GET  /verum                   — Verum product page (HTML)
+  GET  /verum/values            — list 15 values with descriptions
+  POST /verum/score             — score a text for value alignment
+  POST /verum/certify           — issue a signed Verum certificate
+  GET  /verum/certificate/{id}  — retrieve a certificate by ID
+  GET  /verum/certificates      — list certificates
+
 Run with:
   python -m api.server          (development)
   uvicorn api.app:app --port 8000 --reload
@@ -17,45 +24,16 @@ Run with:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import secrets
 import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from fastapi import FastAPI, HTTPException, Path as FPath, Query, Cookie, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-
-# ---------------------------------------------------------------------------
-# Auth — simple token-based session
-# ---------------------------------------------------------------------------
-_USERS_FILE = _ROOT / "data" / "users.json"
-_sessions: dict = {}  # token -> {email, name, role}
-
-def _load_users() -> dict:
-    if _USERS_FILE.exists():
-        return json.loads(_USERS_FILE.read_text())
-    return {}
-
-def _verify_password(email: str, password: str) -> dict | None:
-    users = _load_users()
-    user = users.get(email)
-    if not user:
-        return None
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
-    if pw_hash == user["pw_hash"]:
-        return user
-    return None
-
-def _get_session(token: str | None) -> dict | None:
-    if not token:
-        return None
-    return _sessions.get(token)
+from fastapi import FastAPI, HTTPException, Path as FPath, Query
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from api.models import (
     IngestRequest, IngestResponse,
@@ -63,30 +41,42 @@ from api.models import (
     FigureListResponse, FigureListItem,
     UniversalProfileResponse, UniversalValueEntry,
     ExportRequest, ExportResponse,
-    VerumValuesResponse, VerumValueInfo,
-    VerumScoreRequest, VerumScoreResponse, VerumSignal,
-    VerumCertifyRequest, VerumCertifyResponse,
-    VerumCertificatesResponse, VerumCertificateSummary,
 )
+from api.verum_routes import router as verum_router
 
 _log = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Ethos + Verum API",
     description=(
-        "Universal Value Extraction Pipeline & Certification — REST interface.\n\n"
+        "Universal Value Extraction Pipeline — REST interface.\n\n"
         "Ingest historical figure corpora, query value profiles, "
-        "export RIC training data, and certify value alignment."
+        "export RIC training data, and issue Verum alignment certificates."
     ),
     version="1.0.0",
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ---------------------------------------------------------------------------
+# Static files (Verum frontend + media)
+# ---------------------------------------------------------------------------
+
+_STATIC = _ROOT / "static"
+if _STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
+
+@app.get("/verum", include_in_schema=False)
+def verum_frontend():
+    """Serve the Verum product page."""
+    page = _STATIC / "verum.html"
+    if not page.exists():
+        raise HTTPException(status_code=404, detail="verum.html not found")
+    return FileResponse(str(page))
+
+# ---------------------------------------------------------------------------
+# Verum routes
+# ---------------------------------------------------------------------------
+
+app.include_router(verum_router)
 
 
 # ---------------------------------------------------------------------------
@@ -97,52 +87,6 @@ app.add_middleware(
 def health():
     """Returns 200 if the API is running."""
     return {"status": "ok"}
-
-
-# ---------------------------------------------------------------------------
-# Auth
-# ---------------------------------------------------------------------------
-
-from pydantic import BaseModel as _BM
-
-class _LoginRequest(_BM):
-    email: str
-    password: str
-
-@app.post("/auth/login", tags=["auth"])
-def auth_login(body: _LoginRequest, response: Response):
-    """Authenticate and receive a session token (set as cookie)."""
-    user = _verify_password(body.email.lower().strip(), body.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password.")
-    token = secrets.token_urlsafe(48)
-    _sessions[token] = {"email": body.email.lower().strip(), "name": user["name"], "role": user.get("role", "user")}
-    response.set_cookie(
-        key="tf_session",
-        value=token,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        max_age=86400 * 7,  # 7 days
-        path="/",
-    )
-    return {"ok": True, "name": user["name"], "role": user.get("role", "user")}
-
-@app.get("/auth/me", tags=["auth"])
-def auth_me(tf_session: str | None = Cookie(None)):
-    """Check current session."""
-    session = _get_session(tf_session)
-    if not session:
-        raise HTTPException(status_code=401, detail="Not authenticated.")
-    return {"ok": True, "email": session["email"], "name": session["name"], "role": session["role"]}
-
-@app.post("/auth/logout", tags=["auth"])
-def auth_logout(tf_session: str | None = Cookie(None), response: Response = None):
-    """End session."""
-    if tf_session and tf_session in _sessions:
-        del _sessions[tf_session]
-    response.delete_cookie("tf_session", path="/")
-    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -401,215 +345,3 @@ def _run_export(req: ExportRequest) -> ExportResponse:
         output_dir=None if req.dry_run else req.output_dir,
         files_written=files_written,
     )
-
-
-# ---------------------------------------------------------------------------
-# Verum endpoints
-# ---------------------------------------------------------------------------
-
-# In-memory certificate store (persists for the lifetime of the process)
-_certificates: dict = {}
-
-# Value descriptions for /verum/values
-_VALUE_DESCRIPTIONS = {
-    "integrity":      "Honest and truthful — says what is real, refuses deception even at cost to self",
-    "courage":        "Acts despite fear — faces difficulty and speaks unpopular truths",
-    "compassion":     "Responds to suffering — prioritizes others' wellbeing at personal cost",
-    "resilience":     "Continues through adversity — rebuilds after failure without bitterness",
-    "patience":       "Waits without forcing — allows things to unfold on their own schedule",
-    "humility":       "Acknowledges limitation — defers when others know better",
-    "fairness":       "Applies consistent standards — no favoritism even under pressure",
-    "loyalty":        "Keeps faith with commitments and people when tested",
-    "responsibility": "Owns outcomes — accepts consequences rather than deflecting",
-    "growth":         "Transforms through experience — revises understanding when evidence demands",
-    "independence":   "Acts on own judgment — doesn't need permission or consensus",
-    "curiosity":      "Pursues understanding — follows questions past convenience",
-    "commitment":     "Sees things through — stays when it costs something to stay",
-    "love":           "Acts for others' wellbeing — prioritizes the beloved over comfort",
-    "gratitude":      "Recognizes what was given — carries others' generosity forward",
-}
-
-
-@app.get("/verum/values", response_model=VerumValuesResponse, tags=["verum"])
-def verum_values():
-    """List all 15 values with descriptions."""
-    items = [VerumValueInfo(value_name=k, description=v) for k, v in _VALUE_DESCRIPTIONS.items()]
-    return VerumValuesResponse(values=items, total=len(items))
-
-
-@app.post("/verum/score", response_model=VerumScoreResponse, tags=["verum"])
-def verum_score(body: VerumScoreRequest):
-    """Score a text sample for value alignment."""
-    from core.value_extractor import extract_value_signals
-    from core.resistance import compute_resistance
-    from cli.export import classify_observation
-
-    if body.p0_threshold >= body.p1_threshold:
-        raise HTTPException(status_code=422, detail="p0_threshold must be less than p1_threshold")
-
-    text = body.text[:50000]
-    resistance = compute_resistance(text, body.significance, body.doc_type)
-    raw_signals = extract_value_signals(text, "verum_score", body.significance, body.doc_type)
-
-    signals = []
-    p1 = p0 = apy = ambig = 0
-    for sig in raw_signals:
-        label, reason, conf = classify_observation(
-            sig["text_excerpt"], resistance, body.p1_threshold, body.p0_threshold,
-        )
-        if label == "P1": p1 += 1
-        elif label == "P0": p0 += 1
-        elif label == "APY": apy += 1
-        else: ambig += 1
-
-        signals.append(VerumSignal(
-            value_name=sig["value_name"],
-            resistance=resistance,
-            label=label,
-            label_reason=reason,
-            confidence=conf,
-            disambiguation_confidence=sig.get("disambiguation_confidence", 1.0),
-            text_excerpt=sig.get("text_excerpt", ""),
-        ))
-
-    total = p1 + p0 + apy + ambig
-    p1_ratio = p1 / total if total > 0 else 0.0
-    avg_p1_res = resistance if p1 > 0 else 0.0
-    verum_score_val = round(p1_ratio * avg_p1_res, 4)
-
-    return VerumScoreResponse(
-        verum_score=verum_score_val,
-        resistance=resistance,
-        p1_count=p1, p0_count=p0, apy_count=apy,
-        ambiguous_count=ambig, total_signals=total,
-        signals=signals,
-    )
-
-
-@app.post("/verum/certify", response_model=VerumCertifyResponse, tags=["verum"])
-def verum_certify(body: VerumCertifyRequest):
-    """Issue a signed Verum certificate for an entity."""
-    import hashlib, json, time, uuid
-    from core.value_extractor import extract_value_signals
-    from core.resistance import compute_resistance
-    from cli.export import classify_observation
-
-    if body.p0_threshold >= body.p1_threshold:
-        raise HTTPException(status_code=422, detail="p0_threshold must be less than p1_threshold")
-
-    if len(body.samples) < 5:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Certification requires at least 5 distinct text samples. You provided {len(body.samples)}. "
-                   "A certificate backed by thin evidence would be worth nothing.",
-        )
-
-    # Score all samples
-    all_signals = []
-    for sample in body.samples:
-        text = sample[:50000]
-        resistance = compute_resistance(text, body.significance, body.doc_type)
-        raw = extract_value_signals(text, "verum_certify", body.significance, body.doc_type)
-        for sig in raw:
-            label, reason, conf = classify_observation(
-                sig["text_excerpt"], resistance, body.p1_threshold, body.p0_threshold,
-            )
-            all_signals.append({
-                "value_name": sig["value_name"],
-                "resistance": resistance,
-                "label": label,
-            })
-
-    # Aggregate per-value P1 stats
-    value_p1: dict = {}
-    for s in all_signals:
-        if s["label"] == "P1":
-            vn = s["value_name"]
-            if vn not in value_p1:
-                value_p1[vn] = {"count": 0, "resistances": []}
-            value_p1[vn]["count"] += 1
-            value_p1[vn]["resistances"].append(s["resistance"])
-
-    value_scores = {}
-    for vn, data in value_p1.items():
-        avg_r = sum(data["resistances"]) / len(data["resistances"])
-        value_scores[vn] = {"p1_count": data["count"], "avg_resistance": round(avg_r, 4)}
-
-    values_certified = sorted(value_scores.keys())
-    total = len(all_signals)
-    p1_total = sum(d["count"] for d in value_p1.values())
-    p1_ratio = p1_total / total if total > 0 else 0.0
-    avg_p1_res = (
-        sum(r for d in value_p1.values() for r in d["resistances"]) / p1_total
-        if p1_total > 0 else 0.0
-    )
-    overall_score = round(p1_ratio * avg_p1_res, 4)
-    certified = overall_score >= body.min_score and len(values_certified) >= body.min_values
-    issued_at = time.time()
-
-    # Signature
-    sig_input = json.dumps({
-        "entity_name": body.entity_name,
-        "samples": sorted(body.samples),
-        "overall_score": overall_score,
-        "values_certified": values_certified,
-        "issued_at": issued_at,
-        "doc_type": body.doc_type,
-        "p1_threshold": body.p1_threshold,
-        "p0_threshold": body.p0_threshold,
-        "min_score": body.min_score,
-        "min_values": body.min_values,
-    }, sort_keys=True)
-    signature = "sha256:" + hashlib.sha256(sig_input.encode()).hexdigest()
-
-    cert_id = str(uuid.uuid4())
-    cert = VerumCertifyResponse(
-        certificate_id=cert_id,
-        entity_name=body.entity_name,
-        certified=certified,
-        verum_score=overall_score,
-        sample_count=len(body.samples),
-        values_certified=values_certified,
-        value_scores=value_scores,
-        issued_at=issued_at,
-        doc_type=body.doc_type,
-        p1_threshold=body.p1_threshold,
-        p0_threshold=body.p0_threshold,
-        min_score=body.min_score,
-        min_values=body.min_values,
-        signature=signature,
-    )
-    _certificates[cert_id] = cert
-    return cert
-
-
-@app.get("/verum/certificate/{cert_id}", response_model=VerumCertifyResponse, tags=["verum"])
-def verum_get_certificate(cert_id: str):
-    """Retrieve a certificate by ID."""
-    cert = _certificates.get(cert_id)
-    if not cert:
-        raise HTTPException(status_code=404, detail="Certificate not found")
-    return cert
-
-
-@app.get("/verum/certificates", response_model=VerumCertificatesResponse, tags=["verum"])
-def verum_list_certificates(
-    entity: str = Query(None, description="Filter by entity name"),
-    limit: int = Query(20, ge=1, le=100),
-):
-    """List certificates with optional filtering."""
-    certs = list(_certificates.values())
-    if entity:
-        certs = [c for c in certs if c.entity_name.lower() == entity.lower()]
-    certs = certs[:limit]
-    summaries = [
-        VerumCertificateSummary(
-            certificate_id=c.certificate_id,
-            entity_name=c.entity_name,
-            certified=c.certified,
-            verum_score=c.verum_score,
-            issued_at=c.issued_at,
-        )
-        for c in certs
-    ]
-    return VerumCertificatesResponse(certificates=summaries, total=len(summaries))

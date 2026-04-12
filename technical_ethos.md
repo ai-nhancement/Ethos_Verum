@@ -48,7 +48,7 @@ Two databases:
 | Database | Purpose |
 |----------|---------|
 | `data/documents.db` | Ingested passages — the source corpus |
-| `data/values.db` | Extracted signals, value registry, figure metadata |
+| `data/values.db` | Extracted signals, value registry, figure metadata, Verum certificates |
 
 The pipeline is designed around a core invariant: **base extraction is reproducible**. Given the same source text and the same thresholds, the keyword/semantic/structural/phrase layers produce identical output every time. The optional comprehension panel introduces model-dependent variance when enabled; base pipeline reproducibility is preserved for runs without the panel.
 
@@ -73,6 +73,9 @@ core/value_extractor.py — multi-layer extraction loop
     └── core/value_store.py   — observation + registry persistence (values.db)
     ↓
 cli/export.py          — read value_observations → P1/P0/APY classification → JSONL
+
+api/verum_routes.py    — Verum API (score + certify + retrieve)
+    └── core/verum.py  — score_text() + certify() — reuses extraction + resistance from Ethos
 ```
 
 ---
@@ -194,6 +197,7 @@ SQLite singleton at `data/values.db`. Stores value observations, registry, water
 | `figure_sources` | Figure metadata: name, doc_type, passage_count, ingested_at. |
 | `value_tension` | Value tension events: `(id, session_id, record_id, ts, value_held, value_failed, resistance, text_excerpt, created_at)`. Written by `_detect_tensions()` in `cli/export.py`. |
 | `apy_context` | Rolling APY pressure buffer: `(id, session_id, record_id, ts, passage_idx, markers_json, window_n, created_at)`. Used by cross-passage APY detection. Pruned to N most recent per session. |
+| `verum_certificates` | Signed Verum certificates: `(id, entity_name, certified, verum_score, sample_count, values_certified, issued_at, figure_basis, signature, payload)`. Written by `core/verum.certify()`. |
 
 **Key methods:**
 
@@ -211,6 +215,45 @@ SQLite singleton at `data/values.db`. Stores value observations, registry, water
 | `write_apy_context(session_id, record_id, ts, passage_idx, markers, window_n)` | Write pressure markers to rolling buffer |
 | `get_apy_context(session_id, window_n)` | Read N most recent pressure entries for context lookup |
 | `prune_apy_context(session_id, window_n)` | Delete entries beyond window |
+| `store_certificate(cert)` | Persist a signed Verum certificate |
+| `get_certificate(certificate_id)` | Retrieve a certificate by ID |
+| `list_certificates(entity_name, limit)` | List certificates, optionally filtered by entity |
+
+---
+
+### `core/verum.py`
+
+Scoring and certification engine. Imports from Ethos core — no standalone dependencies.
+
+**Public API:**
+
+```python
+score_text(text: str, doc_type: str = "unknown",
+           p1_threshold: float = 0.55,
+           p0_threshold: float = 0.35) -> dict
+
+certify(entity_name: str, samples: list[str],
+        doc_type: str = "unknown",
+        p1_threshold: float = 0.55,
+        p0_threshold: float = 0.35,
+        min_score: float = 0.40,
+        min_values: int = 2,
+        figure_basis: str = "") -> dict
+```
+
+**Score formula:**
+
+```
+verum_score = P1_ratio × avg_P1_resistance
+```
+
+`score_text()` runs `extract_value_signals()` + `compute_resistance()` on the input, classifies each signal via `classify_observation()`, and returns per-value breakdowns and the aggregate score.
+
+**Certificate:**
+
+`certify()` aggregates `score_text()` across all samples, then issues a signed certificate if `overall_score >= min_score` AND `len(values_certified) >= min_values`. Certificate ID is a random UUID. Signature is deterministic SHA-256 over all 10 certification parameters (entity, samples, score, values, issued_at, doc_type, p1_threshold, p0_threshold, min_score, min_values) — all threshold parameters included so the signature changes if thresholds are relaxed.
+
+**No LLM calls.** Pure Ethos pipeline.
 
 ---
 
@@ -564,8 +607,10 @@ A figure can be ingested from multiple source files, multiple document types, ac
 | `core/mft_classifier.py` | MoralFoundationsClassifier (L3c) | `classify(text)` |
 | `core/polarity_layer.py` | Two-axis polarity scoring | `score_polarity(text, value_name)` |
 | `core/comprehension_panel.py` | Three-model majority-vote verification (optional) | `verify_signals(text, figure_name, signals, enabled)`, `is_available()` |
+| `core/verum.py` | Verum scoring + certification engine | `score_text(text, doc_type, p1_threshold, p0_threshold)`, `certify(entity_name, samples, ...)` |
 | `cli/ingest.py` | Ingestion CLI | `ingest(...)`, `segment_text(...)` |
 | `cli/export.py` | Export CLI | `export(...)`, `classify_observation(...)`, `build_training_records(...)`, `_compute_cooccurrence(...)`, `_detect_tensions(...)` |
+| `api/verum_routes.py` | Verum FastAPI router (`/verum` prefix) | 5 endpoints: values, score, certify, certificate/{id}, certificates |
 
 ---
 
@@ -691,6 +736,18 @@ JFK, MLK, Malcolm X, Churchill, Nixon, Oppenheimer — figures of genuine conseq
 - [x] Source chain: `+panel` appended to `value_observations.source` for verified signals
 - [x] `tests/test_comprehension_panel.py` — 42 tests
 - [x] 934 tests passing total
+
+### Verum Integration ✅ (2026-03-21)
+- [x] `core/verum.py` — `score_text()` + `certify()` — reuses Ethos extraction pipeline
+- [x] `api/verum_routes.py` — 5 endpoints under `/verum` prefix
+- [x] `api/models.py` — Pydantic models for all Verum request/response types
+- [x] `core/value_store.py` — `verum_certificates` table + `store_certificate()`, `get_certificate()`, `list_certificates()`
+- [x] `static/verum.html` — frontend served at `GET /verum`
+- [x] Signature covers all 10 certification parameters — threshold manipulation changes the signature
+- [x] `@model_validator` enforces `p0_threshold < p1_threshold` on both request models
+- [x] Cross-session consistency bug fixed: `lookup_session_id` parameter routes query to real session observations
+- [x] `get_figures_list()` `top_value` fixed: `ORDER BY weight DESC LIMIT 1` subquery
+- [x] `record_observation()` dedup check on `(session_id, record_id, value_name)` before INSERT
 
 ### Phase 7 — SRL Integration 💡
 - [ ] Port `modules/srl/` from AiMe: claim_extractor, ric_gate, trait_compiler
