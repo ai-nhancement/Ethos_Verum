@@ -5,6 +5,7 @@
 **Contact:** john@ai-nhancement.com
 **Date:** April 2026
 **Code:** https://github.com/ai-nhancement/Ethos
+**Live Demo:** https://trust-forged.com
 
 ---
 
@@ -308,9 +309,11 @@ That is the premise Ethos is designed to test.
 
 ---
 
-## Code Availability
+## Code and Live Demo
 
 The complete Ethos pipeline -- including all seven extraction layers, resistance scoring, the comprehension panel, CLI tools, REST API, and 934 passing tests -- is open-source and available at https://github.com/ai-nhancement/Ethos. The repository includes sample corpora, batch ingestion tools, and export utilities for producing labeled JSONL training data. Verum, the companion certification layer, is included in the same repository.
+
+A live deployment of the Verum scoring and certification system is available at https://trust-forged.com, where researchers can submit text and receive value alignment scores and signed certificates without installing the pipeline locally.
 
 ---
 
