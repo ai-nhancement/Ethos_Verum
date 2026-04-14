@@ -33,13 +33,32 @@ sys.path.insert(0, str(_ROOT))
 
 
 # ---------------------------------------------------------------------------
-# Shared client fixture (no pipeline mocking — each section adds its own)
+# Shared client fixture
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def client():
+def pro_key():
+    return "test-pro-key-12345"
+
+@pytest.fixture(scope="module")
+def client(pro_key):
     from fastapi.testclient import TestClient
     from api.app import app
+    import api.tier
+    
+    # Mock _load_pro_keys to recognize our test key
+    with patch("api.tier._load_pro_keys", return_value={pro_key}):
+        with TestClient(app) as c:
+            # Set Pro key by default so existing tests pass
+            c.headers.update({"X-Api-Key": pro_key})
+            yield c
+
+@pytest.fixture
+def free_client():
+    from fastapi.testclient import TestClient
+    from api.app import app
+    import api.tier
+    # No key -> free tier
     with TestClient(app) as c:
         yield c
 
@@ -645,3 +664,132 @@ class TestRealPipeline:
         r = client.post("/figures/bad name!/ingest", json={"text": self._COURAGE_TEXT})
         # FastAPI will URL-decode the path; the pipeline must reject the name
         assert r.status_code in (404, 422)
+
+
+# ============================================================================
+# Section 5 — Tier gating tests
+# ============================================================================
+
+class TestTierGating:
+    """
+    Verify that the tier system actually gates endpoints correctly.
+    Uses the module-level fixtures which test the full resolve_tier stack.
+    """
+
+    @pytest.fixture()
+    def pro_client(self, client):
+        """Alias for module-level client (which is Pro)."""
+        return client
+
+    # -- Free tier: open endpoints --
+
+    def test_free_health_open(self, free_client):
+        assert free_client.get("/health").status_code == 200
+
+    def test_free_tier_endpoint_returns_free(self, free_client):
+        r = free_client.get("/tier")
+        assert r.status_code == 200
+        assert r.json()["tier"] == "free"
+        assert r.json()["values_available"] == 5
+
+    def test_free_values_open(self, free_client):
+        r = free_client.get("/verum/values")
+        assert r.status_code == 200
+        assert r.json()["total"] == 15
+
+    # -- Free tier: score returns filtered signals --
+
+    def test_free_score_returns_only_free_values(self, free_client):
+        from api.tier import FREE_TIER_VALUES
+        r = free_client.post("/verum/score", json={
+            "text": "He showed great courage under fire and acted with deep integrity "
+                    "despite the personal cost. His compassion for others was evident "
+                    "in every decision. He demonstrated resilience through hardship "
+                    "and took full responsibility for the outcomes."
+        })
+        assert r.status_code == 200
+        data = r.json()
+        for sig in data["signals"]:
+            assert sig["value_name"] in FREE_TIER_VALUES, (
+                f"Free tier leaked non-free value: {sig['value_name']}"
+            )
+
+    def test_free_score_redacts_text_excerpts(self, free_client):
+        r = free_client.post("/verum/score", json={
+            "text": "She stood with integrity when everyone else walked away."
+        })
+        assert r.status_code == 200
+        for sig in r.json()["signals"]:
+            assert "Pro subscription" in sig["text_excerpt"]
+
+    def test_free_score_max_5_signals(self, free_client):
+        r = free_client.post("/verum/score", json={
+            "text": "He showed courage, integrity, compassion, resilience, "
+                    "and responsibility in every action he took despite the cost."
+        })
+        assert r.status_code == 200
+        assert len(r.json()["signals"]) <= 5
+
+    # -- Free tier: pro-only endpoints return 403 --
+
+    def test_free_certify_blocked(self, free_client):
+        r = free_client.post("/verum/certify", json={
+            "entity_name": "test",
+            "samples": ["sample text"],
+        })
+        assert r.status_code == 403
+
+    def test_free_certificate_blocked(self, free_client):
+        r = free_client.get("/verum/certificate/fake-id")
+        assert r.status_code == 403
+
+    def test_free_certificates_list_blocked(self, free_client):
+        r = free_client.get("/verum/certificates")
+        assert r.status_code == 403
+
+    def test_free_figures_list_blocked(self, free_client):
+        r = free_client.get("/figures")
+        assert r.status_code == 403
+
+    def test_free_figure_profile_blocked(self, free_client):
+        r = free_client.get("/figures/gandhi/profile")
+        assert r.status_code == 403
+
+    def test_free_universal_profile_blocked(self, free_client):
+        r = free_client.get("/figures/universal")
+        assert r.status_code == 403
+
+    def test_free_ingest_blocked(self, free_client):
+        r = free_client.post("/figures/test/ingest", json={
+            "text": "Some text", "pronoun": "he"
+        })
+        assert r.status_code == 403
+
+    def test_free_export_blocked(self, free_client):
+        r = free_client.post("/export/ric", json={"dry_run": True})
+        assert r.status_code == 403
+
+    # -- Pro tier: gated endpoints accessible --
+
+    def test_pro_tier_endpoint_returns_pro(self, pro_client):
+        r = pro_client.get("/tier")
+        assert r.status_code == 200
+        assert r.json()["tier"] == "pro"
+        assert r.json()["values_available"] == 15
+
+    def test_pro_score_returns_all_values(self, pro_client):
+        r = pro_client.post("/verum/score", json={
+            "text": "He showed great courage under fire and acted with deep integrity."
+        })
+        assert r.status_code == 200
+        # Pro should not redact excerpts
+        for sig in r.json()["signals"]:
+            assert "Pro subscription" not in sig["text_excerpt"]
+
+    def test_pro_figures_list_accessible(self, pro_client):
+        r = pro_client.get("/figures")
+        assert r.status_code == 200
+
+    def test_pro_certificates_list_accessible(self, pro_client):
+        r = pro_client.get("/verum/certificates")
+        assert r.status_code == 200
