@@ -1,18 +1,15 @@
 <p align="center">
   <img src="ethos_logo.png" alt="Ethos" width="350">
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="verum_logo.png" alt="Verum" width="350">
 </p>
 
-<h1 align="center">Ethos + Verum</h1>
+<h1 align="center">Ethos</h1>
 
 <p align="center">
-  <strong>Extract what integrity looks like. Certify what meets the standard.</strong>
+  <strong>Universal Value Extraction Pipeline. Behavioral training data for AI alignment.</strong>
 </p>
 
 <p align="center">
   <a href="#how-it-works"><img src="https://img.shields.io/badge/Ethos-extraction_pipeline-604020?style=for-the-badge" alt="Ethos"></a>
-  <a href="VERUM.md"><img src="https://img.shields.io/badge/Verum-certification_layer-2ea44f?style=for-the-badge" alt="Verum"></a>
   <a href="API_REFERENCE.md"><img src="https://img.shields.io/badge/docs-API_Reference-604020?style=for-the-badge" alt="API Reference"></a>
   <a href="#the-15-values"><img src="https://img.shields.io/badge/values-15-8B6914?style=for-the-badge" alt="15 Values"></a>
   <a href="#testing"><img src="https://img.shields.io/badge/tests-934_passing-C0834D?style=for-the-badge" alt="934 Tests"></a>
@@ -20,9 +17,13 @@
 
 ---
 
-**Ethos** extracts behavioral evidence of human values from documented human conduct and produces labeled training data for AI alignment research. **Verum** scores and certifies whether text demonstrates those values under pressure.
+> **This is the open-source Ethos extraction pipeline.** It provides the full value extraction, resistance scoring, and training data export capabilities described below. For the complete Verum product, including real-time value alignment scoring, SHA-256 signed certification, interactive reports, and dataset compilation, visit **[trust-forged.com](https://trust-forged.com)**.
 
-The pipeline is source-agnostic: it processes historical archives, contemporary journals, personal blogs, interview transcripts, social media posts, conversational records, or any text associated with an identifiable person. A value stated in comfort is weak signal. A value demonstrated at personal cost — under threat, under pressure, against interest — is strong signal. Ethos measures that cost. Verum certifies it.
+---
+
+**Ethos** extracts behavioral evidence of human values from documented human conduct and produces labeled training data for AI alignment research.
+
+The pipeline is source-agnostic: it processes historical archives, contemporary journals, personal blogs, interview transcripts, social media posts, conversational records, or any text associated with an identifiable person. A value stated in comfort is weak signal. A value demonstrated at personal cost, under threat, under pressure, against interest, is strong signal. Ethos measures that cost.
 
 ---
 
@@ -35,7 +36,7 @@ Most value-alignment work in AI is built on shaky ground:
 - RLHF measures preference, not principle
 - Constitutional AI encodes rules from the top down, not evidence from the bottom up
 
-Ethos goes to the source: documented human behavior under real conditions — from any era, any social position, any medium. The same pipeline processes a letter written by Abraham Lincoln in 1863 and a blog post written by a nurse in 2025. The resistance score measures what nobody else is measuring systematically: the cost of holding a value when it would be easier not to.
+Ethos goes to the source: documented human behavior under real conditions, from any era, any social position, any medium. The same pipeline processes a letter written by Abraham Lincoln in 1863 and a blog post written by a nurse in 2025. The resistance score measures what nobody else is measuring systematically: the cost of holding a value when it would be easier not to.
 
 When Ethos flags a value signal, the answer to "why?" traces back to a real person, a real moment, and a real cost. That person can be a head of state or a line cook. The behavioral signal is in the conduct, not the fame.
 
@@ -202,8 +203,6 @@ python -m api.server
 
 ## API Endpoints
 
-### Ethos
-
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/figures/{name}/ingest` | Ingest text for a figure |
@@ -212,16 +211,6 @@ python -m api.server
 | `GET` | `/figures/universal` | Cross-figure aggregate |
 | `POST` | `/export/ric` | Export labeled training data |
 | `GET` | `/health` | Health check |
-
-### Verum (integrated)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/verum/values` | List all 15 values with descriptions |
-| `POST` | `/verum/score` | Score a text for value alignment |
-| `POST` | `/verum/certify` | Issue a signed certificate |
-| `GET` | `/verum/certificate/{cert_id}` | Retrieve a certificate |
-| `GET` | `/verum/certificates` | List certificates |
 
 ---
 
@@ -252,7 +241,7 @@ Each exported record is a JSONL line:
 
 ## Design Principles
 
-1. **Behavioral evidence over hypotheticals.** Extract from documented human conduct — historical or contemporary — not surveys or preferences.
+1. **Behavioral evidence over hypotheticals.** Extract from documented human conduct, not surveys or preferences.
 2. **Cost-weighted signal.** High resistance = high informational value. A value demonstrated under threat is worth more than a value stated in comfort.
 3. **Document authenticity calibration.** Private writing > public speech. Observed behavior > stated belief.
 4. **Deterministic reproducibility.** No randomness. Same input + same weights = same output.
@@ -266,13 +255,12 @@ Each exported record is a JSONL line:
 ## Project Structure
 
 ```
-core/           Extraction pipeline, storage, scoring (22 modules)
+core/           Extraction pipeline, storage, scoring (21 modules)
 cli/            Command-line tools (ingest, export, batch, stats)
-api/            FastAPI REST service + Verum endpoints
+api/            FastAPI REST service
 tests/          934 tests
 data/           SQLite databases + bundled lexicons
 samples/        Example manifests and test figures
-static/         Verum product page
 IP/             Research notes
 ```
 
@@ -287,12 +275,26 @@ pytest tests/ -q
 
 ---
 
+## Full Product: Verum
+
+This repository contains the open-source Ethos extraction pipeline. The full **Verum** product, built on top of Ethos, adds:
+
+- **Real-time value alignment scoring** against all 15 values
+- **Resistance-weighted reports** with per-signal detail
+- **SHA-256 signed certification** for AI systems and entities
+- **Interactive scoring** via the web interface
+- **Dataset compilation** with JSONL export for model training
+- **Figure basis comparison** (benchmark AI against historical figures)
+
+Try Verum at **[trust-forged.com](https://trust-forged.com)**
+
+---
+
 ## Documentation
 
 | Document | Description |
 |----------|-------------|
 | `technical_ethos.md` | Full technical reference: formulas, schema, layer wiring |
-| `technical_verum.md` | Verum technical reference: score formula, certificate signature, API |
 | `OPERATIONS.md` | Operational guide: batch processing, export, API usage |
 | `STATUS_ethos.md` | Phase-by-phase implementation status |
 | `PAPER.md` | Research paper |
@@ -301,14 +303,10 @@ pytest tests/ -q
 
 ## About
 
-Ethos and Verum were built by [ai-nhancement](https://github.com/ai-nhancement) as part of the AiMe project ecosystem.
-
-| Product | Role |
-|---------|------|
-| **[AiMe](https://github.com/ai-nhancement/AiMe-public)** | How AI relates to a person |
-| **Ethos** | What integrity looks like, extracted from the human record |
-| **Verum** | Whether AI output meets that standard |
-
-Ethos is the foundation. Verum is what you build on top of it. See the [full Verum documentation](VERUM.md) for the scoring formula, certification flow, and API.
+Ethos was built by [John Canady Jr.](https://www.linkedin.com/in/john-canady-jr-220893399/) at [AI nHancement](https://www.ai-nhancement.com) as part of the AiMe cognitive architecture ecosystem.
 
 > *"A value stated in comfort is weak signal. A value demonstrated at personal cost is strong signal."*
+
+**Contact:** john@ai-nhancement.com
+**Website:** [ai-nhancement.com](https://www.ai-nhancement.com)
+**Verum:** [trust-forged.com](https://trust-forged.com)

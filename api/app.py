@@ -1,25 +1,22 @@
 """
 api/app.py
 
-Ethos + Verum REST API — FastAPI application.
+Ethos REST API -- FastAPI application.
 
 Endpoints:
-  POST /figures/{name}/ingest   — ingest text for a figure
-  GET  /figures                 — list all ingested figures
-  GET  /figures/{name}/profile  — value registry for a figure
-  GET  /figures/universal       — cross-figure aggregate registry
-  POST /export/ric              — trigger RIC export, return report
-
-  GET  /verum                   — Verum product page (HTML)
-  GET  /verum/values            — list 15 values with descriptions
-  POST /verum/score             — score a text for value alignment
-  POST /verum/certify           — issue a signed Verum certificate
-  GET  /verum/certificate/{id}  — retrieve a certificate by ID
-  GET  /verum/certificates      — list certificates
+  POST /figures/{name}/ingest   -- ingest text for a figure
+  GET  /figures                 -- list all ingested figures
+  GET  /figures/{name}/profile  -- value registry for a figure
+  GET  /figures/universal       -- cross-figure aggregate registry
+  POST /export/ric              -- trigger RIC export, return report
 
 Run with:
   python -m api.server          (development)
   uvicorn api.app:app --port 8000 --reload
+
+Note: This is the open-source Ethos pipeline. For the full Verum
+scoring, certification, and dataset compilation product, visit
+https://trust-forged.com
 """
 
 from __future__ import annotations
@@ -31,8 +28,8 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from fastapi import Depends, FastAPI, HTTPException, Path as FPath, Query
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, HTTPException, Path as FPath, Query
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from api.models import (
@@ -42,44 +39,19 @@ from api.models import (
     UniversalProfileResponse, UniversalValueEntry,
     ExportRequest, ExportResponse,
 )
-from api.verum_routes import router as verum_router
-from api.billing import router as billing_router
-from api.tier import resolve_tier, require_pro
 
 _log = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="Ethos + Verum API",
+    title="Ethos API",
     description=(
-        "Universal Value Extraction Pipeline — REST interface.\n\n"
+        "Universal Value Extraction Pipeline -- REST interface.\n\n"
         "Ingest historical figure corpora, query value profiles, "
-        "export RIC training data, and issue Verum alignment certificates."
+        "and export RIC training data.\n\n"
+        "For Verum scoring and certification, visit https://trust-forged.com"
     ),
     version="1.0.0",
 )
-
-# ---------------------------------------------------------------------------
-# Static files (Verum frontend + media)
-# ---------------------------------------------------------------------------
-
-_STATIC = _ROOT / "static"
-if _STATIC.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
-
-@app.get("/verum", include_in_schema=False)
-def verum_frontend():
-    """Serve the Verum product page."""
-    page = _STATIC / "verum.html"
-    if not page.exists():
-        raise HTTPException(status_code=404, detail="verum.html not found")
-    return FileResponse(str(page))
-
-# ---------------------------------------------------------------------------
-# Verum routes
-# ---------------------------------------------------------------------------
-
-app.include_router(verum_router)
-app.include_router(billing_router)
 
 
 # ---------------------------------------------------------------------------
@@ -90,20 +62,6 @@ app.include_router(billing_router)
 def health():
     """Returns 200 if the API is running."""
     return {"status": "ok"}
-
-
-@app.get("/tier", tags=["system"])
-def get_tier(tier: str = Depends(resolve_tier)):
-    """Returns the caller's current tier based on their API key."""
-    from api.tier import FREE_TIER_VALUES
-    return {
-        "tier": tier,
-        "values_available": 5 if tier == "free" else 15,
-        "free_values": sorted(FREE_TIER_VALUES) if tier == "free" else None,
-        "certification": tier == "pro",
-        "export": tier == "pro",
-        "dataset_compilation": tier == "pro",
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +77,9 @@ def get_tier(tier: str = Depends(resolve_tier)):
 def ingest_figure(
     name: str = FPath(..., description="Figure identifier, e.g. 'gandhi', 'lincoln'"),
     body: IngestRequest = ...,
-    tier: str = Depends(resolve_tier),
 ):
     """
     Segment, store, and extract value signals from raw text for a figure.
-    **Requires Pro subscription.**
 
     - **name**: figure identifier (alphanumeric, underscores, hyphens, 1-64 chars)
     - **text**: raw UTF-8 source text
@@ -131,7 +87,6 @@ def ingest_figure(
     - **pub_year**: publication year triggers archaic preprocessing and temporal discount
     - **is_translation**: `true` = known translation (0.85x), `null` = auto-detect
     """
-    require_pro(tier)
     from core.pipeline import ingest_text
     from core.phrase_layer import VALID_PRONOUNS
     pronoun_norm = (body.pronoun or "").lower().strip()
@@ -172,11 +127,10 @@ def ingest_figure(
     "/figures",
     response_model=FigureListResponse,
     tags=["figures"],
-    summary="List all ingested figures (Pro)",
+    summary="List all ingested figures",
 )
-def list_figures(tier: str = Depends(resolve_tier)):
-    """Return all figures that have been ingested into the pipeline. **Requires Pro subscription.**"""
-    require_pro(tier)
+def list_figures():
+    """Return all figures that have been ingested into the pipeline."""
     from core.value_store import get_value_store
     rows = get_value_store().get_figures_list()
     items = [
@@ -205,14 +159,11 @@ def list_figures(tier: str = Depends(resolve_tier)):
 )
 def universal_profile(
     min_demonstrations: int = Query(1, ge=1, description="Min demonstrations to include"),
-    tier: str = Depends(resolve_tier),
 ):
     """
     Aggregate value registry across all ingested figures.
     Shows which values appear most consistently across the corpus.
-    **Requires Pro subscription.**
     """
-    require_pro(tier)
     from core.pipeline import universal_profile as _up
     from core.value_store import get_value_store
 
@@ -244,12 +195,11 @@ def universal_profile(
 def figure_profile(
     name: str = FPath(..., description="Figure identifier"),
     min_demonstrations: int = Query(1, ge=1),
-    tier: str = Depends(resolve_tier),
 ):
     """
-    Return the value registry for a figure. **Requires Pro subscription.**
+    Return the value registry for a figure -- all values observed,
+    sorted by weight (demonstrations x significance x resistance x consistency).
     """
-    require_pro(tier)
     from core.pipeline import figure_profile as _fp
     rows = _fp(figure_name=name, min_demonstrations=min_demonstrations)
     if not rows:
@@ -287,14 +237,12 @@ def figure_profile(
     tags=["export"],
     summary="Export RIC training data",
 )
-def export_ric(body: ExportRequest = ExportRequest(), tier: str = Depends(resolve_tier)):
+def export_ric(body: ExportRequest = ExportRequest()):
     """
     Classify value observations as P1 / P0 / APY and write JSONL training files.
-    **Requires Pro subscription.**
 
     Returns a summary report. Pass `dry_run=true` to get stats without writing files.
     """
-    require_pro(tier)
     try:
         result = _run_export(body)
         return result
